@@ -1,0 +1,6 @@
+node_modules
+/build
+/.react-router
+/data
+*.log
+.DS_Store
