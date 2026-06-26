@@ -52,6 +52,11 @@ function parseInput(fd: FormData): { input?: RecordInput; error?: string } {
   const amount =
     amountNum !== null && Number.isFinite(amountNum) ? amountNum : null;
 
+  const errRaw = String(fd.get("taken_error_min") ?? "").trim();
+  const errNum = errRaw === "" ? null : Number(errRaw);
+  const takenError =
+    errNum !== null && Number.isFinite(errNum) ? Math.round(Math.abs(errNum)) : null;
+
   return {
     input: {
       drug_name: drugName,
@@ -59,6 +64,7 @@ function parseInput(fd: FormData): { input?: RecordInput; error?: string } {
       amount,
       unit: optional("unit"),
       taken_at: takenAt,
+      taken_error_min: takenError,
       note: optional("note"),
     },
   };
@@ -101,6 +107,7 @@ export default function Home({ loaderData }: Route.ComponentProps) {
 
   const [editing, setEditing] = useState<Rec | null>(null);
   const [takenAt, setTakenAt] = useState("");
+  const [takenError, setTakenError] = useState("");
   const [formKey, setFormKey] = useState(0);
 
   const drugRef = useRef<HTMLInputElement>(null);
@@ -127,6 +134,7 @@ export default function Home({ loaderData }: Route.ComponentProps) {
     if (fetcher.data?.ok) {
       setEditing(null);
       setTakenAt(nowLocalInputValue());
+      setTakenError("");
       setFormKey((k) => k + 1);
     }
   }, [fetcher.state, fetcher.data]);
@@ -134,6 +142,7 @@ export default function Home({ loaderData }: Route.ComponentProps) {
   function startEdit(r: Rec) {
     setEditing(r);
     setTakenAt(r.taken_at.slice(0, 16));
+    setTakenError(r.taken_error_min != null ? String(r.taken_error_min) : "");
     setFormKey((k) => k + 1);
     window.scrollTo({ top: 0, behavior: "smooth" });
   }
@@ -141,6 +150,7 @@ export default function Home({ loaderData }: Route.ComponentProps) {
   function cancelEdit() {
     setEditing(null);
     setTakenAt(nowLocalInputValue());
+    setTakenError("");
     setFormKey((k) => k + 1);
   }
 
@@ -236,6 +246,44 @@ export default function Home({ loaderData }: Route.ComponentProps) {
             </button>
           </div>
         </label>
+
+        <div className="mt-3">
+          <span className="text-sm font-medium text-gray-700">時刻の誤差（±分）</span>
+          <div className="mt-1 flex items-center gap-2">
+            <input
+              name="taken_error_min"
+              type="number"
+              min="0"
+              step="1"
+              inputMode="numeric"
+              value={takenError}
+              onChange={(e) => setTakenError(e.target.value)}
+              placeholder="任意"
+              className="w-20 rounded-lg border border-gray-300 px-3 py-2 text-base outline-none focus:border-gray-900"
+            />
+            <div className="flex gap-1">
+              {[5, 10, 30, 60].map((n) => {
+                const active = takenError === String(n);
+                return (
+                  <button
+                    key={n}
+                    type="button"
+                    onClick={() =>
+                      setTakenError((cur) => (cur === String(n) ? "" : String(n)))
+                    }
+                    className={`rounded-lg border px-3 py-2 text-sm font-medium ${
+                      active
+                        ? "border-gray-900 bg-gray-900 text-white"
+                        : "border-gray-300 text-gray-700 hover:bg-gray-50"
+                    }`}
+                  >
+                    ±{n}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        </div>
 
         <label className="mt-3 block">
           <span className="text-sm font-medium text-gray-700">備考</span>
@@ -376,6 +424,7 @@ function RecordRow({
           </div>
           <div className="mt-0.5 text-sm text-gray-500">
             {formatTaken(r.taken_at)}
+            {r.taken_error_min != null && ` ±${r.taken_error_min}分`}
           </div>
           {r.note && <div className="mt-1 text-sm text-gray-700">{r.note}</div>}
         </div>

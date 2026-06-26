@@ -8,6 +8,7 @@ export type Rec = {
   amount: number | null;
   unit: string | null;
   taken_at: string;
+  taken_error_min: number | null;
   note: string | null;
   created_at: string;
   updated_at: string;
@@ -21,6 +22,7 @@ export type RecordInput = {
   amount: number | null;
   unit: string | null;
   taken_at: string;
+  taken_error_min: number | null;
   note: string | null;
 };
 
@@ -37,9 +39,9 @@ export function listRecords(limit = 300): Rec[] {
 
 const insertStmt = db.prepare(
   `INSERT INTO records
-     (drug_name, product_name, amount, unit, taken_at, note, created_at, updated_at)
+     (drug_name, product_name, amount, unit, taken_at, taken_error_min, note, created_at, updated_at)
    VALUES
-     (@drug_name, @product_name, @amount, @unit, @taken_at, @note, @created_at, @updated_at)
+     (@drug_name, @product_name, @amount, @unit, @taken_at, @taken_error_min, @note, @created_at, @updated_at)
    RETURNING *`,
 );
 
@@ -55,9 +57,10 @@ const updateStmt = db.prepare(
           product_name = @product_name,
           amount       = @amount,
           unit         = @unit,
-          taken_at     = @taken_at,
-          note         = @note,
-          updated_at   = @updated_at
+          taken_at        = @taken_at,
+          taken_error_min = @taken_error_min,
+          note            = @note,
+          updated_at      = @updated_at
     WHERE id = @id AND deleted_at IS NULL
    RETURNING *`,
 );

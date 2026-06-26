@@ -32,6 +32,10 @@ const MIGRATIONS: Array<(db: Database.Database) => void> = [
       CREATE INDEX IF NOT EXISTS idx_records_active ON records (deleted_at, taken_at);
     `);
   },
+  // v2 — ± timing tolerance (minutes) for when the dose was actually taken
+  (db) => {
+    db.exec(`ALTER TABLE records ADD COLUMN taken_error_min INTEGER;`);
+  },
 ];
 
 function migrate(db: Database.Database): void {
