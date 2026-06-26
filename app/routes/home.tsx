@@ -15,7 +15,10 @@ import {
   dateKey,
   formatDateHeader,
   formatTaken,
+  isoToSlash,
+  normalizeLocalInput,
   nowLocalInputValue,
+  nowLocalSlash,
 } from "../lib/time";
 
 const COMMON_UNITS = ["mg", "g", "錠", "mL", "包", "滴", "単位", "回"];
@@ -42,10 +45,9 @@ function parseInput(fd: FormData): { input?: RecordInput; error?: string } {
     return v === "" ? null : v;
   };
 
-  const takenRaw = String(fd.get("taken_at") ?? "").trim();
-  if (!takenRaw) return { error: "服用時刻を入力してください" };
-  // datetime-local yields 'YYYY-MM-DDTHH:mm'; normalize to include seconds.
-  const takenAt = takenRaw.length === 16 ? `${takenRaw}:00` : takenRaw;
+  // Accept either the picker value or manual 'YYYY/MM/DD HH:mm' text.
+  const takenAt = normalizeLocalInput(String(fd.get("taken_at") ?? ""));
+  if (!takenAt) return { error: "服用時刻が不正です" };
 
   const amountRaw = String(fd.get("amount") ?? "").trim();
   const amountNum = amountRaw === "" ? null : Number(amountRaw);
@@ -107,6 +109,8 @@ export default function Home({ loaderData }: Route.ComponentProps) {
 
   const [editing, setEditing] = useState<Rec | null>(null);
   const [takenAt, setTakenAt] = useState("");
+  const [manualTime, setManualTime] = useState(false);
+  const [manualText, setManualText] = useState("");
   const [takenError, setTakenError] = useState("");
   const [formKey, setFormKey] = useState(0);
 
@@ -116,6 +120,7 @@ export default function Home({ loaderData }: Route.ComponentProps) {
   // Initialise the time field to "now" on the client (avoids SSR/CSR mismatch).
   useEffect(() => {
     setTakenAt(nowLocalInputValue());
+    setManualText(nowLocalSlash());
   }, []);
 
   // Focus the drug-name field whenever the form (re)mounts.
@@ -134,6 +139,7 @@ export default function Home({ loaderData }: Route.ComponentProps) {
     if (fetcher.data?.ok) {
       setEditing(null);
       setTakenAt(nowLocalInputValue());
+      setManualText(nowLocalSlash());
       setTakenError("");
       setFormKey((k) => k + 1);
     }
@@ -142,6 +148,7 @@ export default function Home({ loaderData }: Route.ComponentProps) {
   function startEdit(r: Rec) {
     setEditing(r);
     setTakenAt(r.taken_at.slice(0, 16));
+    setManualText(isoToSlash(r.taken_at));
     setTakenError(r.taken_error_min != null ? String(r.taken_error_min) : "");
     setFormKey((k) => k + 1);
     window.scrollTo({ top: 0, behavior: "smooth" });
@@ -150,8 +157,21 @@ export default function Home({ loaderData }: Route.ComponentProps) {
   function cancelEdit() {
     setEditing(null);
     setTakenAt(nowLocalInputValue());
+    setManualText(nowLocalSlash());
     setTakenError("");
     setFormKey((k) => k + 1);
+  }
+
+  function toggleManual(checked: boolean) {
+    if (checked) {
+      // entering manual mode: seed the text box from the picker value
+      setManualText(isoToSlash(takenAt));
+    } else {
+      // leaving manual mode: apply the typed text back to the picker if valid
+      const picker = normalizeLocalInput(manualText)?.slice(0, 16);
+      if (picker) setTakenAt(picker);
+    }
+    setManualTime(checked);
   }
 
   const units = Array.from(new Set([...COMMON_UNITS, ...suggestions.units]));
@@ -225,27 +245,48 @@ export default function Home({ loaderData }: Route.ComponentProps) {
           </label>
         </div>
 
-        <label className="mt-3 block">
+        <div className="mt-3">
           <span className="text-sm font-medium text-gray-700">服用時刻 *</span>
-          <div className="mt-1 flex gap-2">
+          <div className="mt-1 flex items-center gap-2">
             <input
-              name="taken_at"
-              type="datetime-local"
-              step="60"
-              required
-              value={takenAt}
-              onChange={(e) => setTakenAt(e.target.value)}
-              className="w-full rounded-lg border border-gray-300 px-3 py-2 text-base outline-none focus:border-gray-900"
+              type="checkbox"
+              checked={manualTime}
+              onChange={(e) => toggleManual(e.target.checked)}
+              className="h-5 w-5 shrink-0 rounded border-gray-300"
             />
+            {manualTime ? (
+              <input
+                name="taken_at"
+                type="text"
+                required
+                value={manualText}
+                onChange={(e) => setManualText(e.target.value)}
+                placeholder="2026/06/27 14:20"
+                className="w-full rounded-lg border border-gray-300 px-3 py-2 text-base outline-none focus:border-gray-900"
+              />
+            ) : (
+              <input
+                name="taken_at"
+                type="datetime-local"
+                step="60"
+                required
+                value={takenAt}
+                onChange={(e) => setTakenAt(e.target.value)}
+                className="w-full rounded-lg border border-gray-300 px-3 py-2 text-base outline-none focus:border-gray-900"
+              />
+            )}
             <button
               type="button"
-              onClick={() => setTakenAt(nowLocalInputValue())}
+              onClick={() => {
+                setTakenAt(nowLocalInputValue());
+                setManualText(nowLocalSlash());
+              }}
               className="shrink-0 rounded-lg border border-gray-300 px-3 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50"
             >
               今
             </button>
           </div>
-        </label>
+        </div>
 
         <div className="mt-3">
           <span className="text-sm font-medium text-gray-700">時刻の誤差（±分）</span>
