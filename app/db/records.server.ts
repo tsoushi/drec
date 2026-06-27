@@ -1,4 +1,5 @@
 import { db } from "./db.server";
+import { logChange } from "./log.server";
 import { nowLocalISO } from "../lib/time";
 
 export type Rec = {
@@ -47,7 +48,9 @@ const insertStmt = db.prepare(
 
 export function createRecord(input: RecordInput): Rec {
   const now = nowLocalISO();
-  return insertStmt.get({ ...input, created_at: now, updated_at: now }) as Rec;
+  const rec = insertStmt.get({ ...input, created_at: now, updated_at: now }) as Rec;
+  logChange("create", "record", rec.id, rec);
+  return rec;
 }
 
 // Note: created_at is intentionally never touched on update (it is immutable).
@@ -66,7 +69,11 @@ const updateStmt = db.prepare(
 );
 
 export function updateRecord(id: number, input: RecordInput): Rec | undefined {
-  return updateStmt.get({ ...input, id, updated_at: nowLocalISO() }) as Rec | undefined;
+  const rec = updateStmt.get({ ...input, id, updated_at: nowLocalISO() }) as
+    | Rec
+    | undefined;
+  if (rec) logChange("update", "record", id, rec);
+  return rec;
 }
 
 // Soft delete: keep the row, just stamp deleted_at so it drops out of queries.
@@ -77,7 +84,8 @@ const deleteStmt = db.prepare(
 );
 
 export function softDeleteRecord(id: number): void {
-  deleteStmt.run({ id, now: nowLocalISO() });
+  const info = deleteStmt.run({ id, now: nowLocalISO() });
+  if (info.changes > 0) logChange("delete", "record", id);
 }
 
 export type Suggestions = {

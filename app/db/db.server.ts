@@ -36,6 +36,31 @@ const MIGRATIONS: Array<(db: Database.Database) => void> = [
   (db) => {
     db.exec(`ALTER TABLE records ADD COLUMN taken_error_min INTEGER;`);
   },
+  // v3 — comments (own timeline position) that can mention 0..N records
+  (db) => {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS comments (
+        id           INTEGER PRIMARY KEY AUTOINCREMENT,
+        body         TEXT    NOT NULL,
+        commented_at TEXT    NOT NULL,
+        created_at   TEXT    NOT NULL,
+        updated_at   TEXT    NOT NULL,
+        deleted_at   TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_comments_active ON comments (deleted_at, commented_at);
+
+      CREATE TABLE IF NOT EXISTS comment_mentions (
+        comment_id INTEGER NOT NULL,
+        record_id  INTEGER NOT NULL,
+        PRIMARY KEY (comment_id, record_id)
+      );
+      CREATE INDEX IF NOT EXISTS idx_comment_mentions_record ON comment_mentions (record_id);
+    `);
+  },
+  // v4 — ± timing tolerance (minutes) for comments too
+  (db) => {
+    db.exec(`ALTER TABLE comments ADD COLUMN commented_error_min INTEGER;`);
+  },
 ];
 
 function migrate(db: Database.Database): void {

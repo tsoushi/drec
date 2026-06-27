@@ -1,5 +1,5 @@
-import { Fragment, useEffect, useRef, useState } from "react";
-import { useFetcher } from "react-router";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
+import { Link, useFetcher } from "react-router";
 
 import type { Route } from "./+types/home";
 import {
@@ -11,6 +11,14 @@ import {
   type Rec,
   type RecordInput,
 } from "../db/records.server";
+import {
+  createComment,
+  listComments,
+  softDeleteComment,
+  updateComment,
+  type Comment,
+  type CommentInput,
+} from "../db/comments.server";
 import {
   dateKey,
   formatDateHeader,
@@ -30,6 +38,7 @@ export function meta(_: Route.MetaArgs) {
 export async function loader(_: Route.LoaderArgs) {
   return {
     records: listRecords(),
+    comments: listComments(),
     suggestions: getSuggestions(),
   };
 }
@@ -72,50 +81,124 @@ function parseInput(fd: FormData): { input?: RecordInput; error?: string } {
   };
 }
 
+function parseCommentInput(fd: FormData): { input?: CommentInput; error?: string } {
+  const body = String(fd.get("body") ?? "").trim();
+  if (!body) return { error: "コメントを入力してください" };
+
+  const commentedAt = normalizeLocalInput(String(fd.get("taken_at") ?? ""));
+  if (!commentedAt) return { error: "コメント時刻が不正です" };
+
+  const mentions = Array.from(
+    new Set(
+      String(fd.get("mentions") ?? "")
+        .split(",")
+        .map((s) => Number(s.trim()))
+        .filter((n) => Number.isInteger(n) && n > 0),
+    ),
+  );
+
+  const errRaw = String(fd.get("taken_error_min") ?? "").trim();
+  const errNum = errRaw === "" ? null : Number(errRaw);
+  const commentedError =
+    errNum !== null && Number.isFinite(errNum) ? Math.round(Math.abs(errNum)) : null;
+
+  return {
+    input: {
+      body,
+      commented_at: commentedAt,
+      commented_error_min: commentedError,
+      mentions,
+    },
+  };
+}
+
 export async function action({
   request,
 }: Route.ActionArgs): Promise<ActionResult> {
   const fd = await request.formData();
   const intent = String(fd.get("intent") ?? "");
+  const id = Number(fd.get("id"));
+  const hasId = Number.isInteger(id) && id > 0;
 
+  // --- records ---
   if (intent === "delete") {
-    const id = Number(fd.get("id"));
-    if (Number.isInteger(id) && id > 0) softDeleteRecord(id);
+    if (hasId) softDeleteRecord(id);
     return { ok: true };
   }
-
-  const { input, error } = parseInput(fd);
-  if (!input) return { ok: false, error: error ?? "入力エラー" };
-
-  if (intent === "update") {
-    const id = Number(fd.get("id"));
-    if (!Number.isInteger(id) || id <= 0) {
-      return { ok: false, error: "対象が見つかりません" };
+  if (intent === "create" || intent === "update") {
+    const { input, error } = parseInput(fd);
+    if (!input) return { ok: false, error: error ?? "入力エラー" };
+    if (intent === "update") {
+      if (!hasId) return { ok: false, error: "対象が見つかりません" };
+      updateRecord(id, input);
+    } else {
+      createRecord(input);
     }
-    updateRecord(id, input);
     return { ok: true };
   }
 
-  createRecord(input);
-  return { ok: true };
+  // --- comments ---
+  if (intent === "comment_delete") {
+    if (hasId) softDeleteComment(id);
+    return { ok: true };
+  }
+  if (intent === "comment_create" || intent === "comment_update") {
+    const { input, error } = parseCommentInput(fd);
+    if (!input) return { ok: false, error: error ?? "入力エラー" };
+    if (intent === "comment_update") {
+      if (!hasId) return { ok: false, error: "対象が見つかりません" };
+      updateComment(id, input);
+    } else {
+      createComment(input);
+    }
+    return { ok: true };
+  }
+
+  return { ok: false, error: "不明な操作です" };
 }
 
 const inputClass =
   "mt-1 w-full rounded-lg border border-gray-300 px-3 py-2 text-base outline-none focus:border-gray-900";
 
+type Mode = "record" | "comment";
+
 export default function Home({ loaderData }: Route.ComponentProps) {
-  const { records, suggestions } = loaderData;
+  const { records, comments, suggestions } = loaderData;
   const fetcher = useFetcher<ActionResult>();
 
+  const [mode, setMode] = useState<Mode>("record");
   const [editing, setEditing] = useState<Rec | null>(null);
+  const [editingComment, setEditingComment] = useState<Comment | null>(null);
   const [takenAt, setTakenAt] = useState("");
   const [manualTime, setManualTime] = useState(false);
   const [manualText, setManualText] = useState("");
   const [takenError, setTakenError] = useState("");
+  const [commentMentions, setCommentMentions] = useState<number[]>([]);
+  const [highlightId, setHighlightId] = useState<number | null>(null);
   const [formKey, setFormKey] = useState(0);
 
   const drugRef = useRef<HTMLInputElement>(null);
+  const bodyRef = useRef<HTMLTextAreaElement>(null);
   const busyRef = useRef(false);
+
+  const recordsById = useMemo(() => {
+    const m = new Map<number, Rec>();
+    for (const r of records) m.set(r.id, r);
+    return m;
+  }, [records]);
+
+  // Records and comments merged into one newest-first timeline.
+  const timeline = useMemo(() => {
+    const items: Array<
+      | { kind: "record"; t: string; key: string; rec: Rec }
+      | { kind: "comment"; t: string; key: string; comment: Comment }
+    > = [
+      ...records.map((r) => ({ kind: "record" as const, t: r.taken_at, key: `r${r.id}`, rec: r })),
+      ...comments.map((c) => ({ kind: "comment" as const, t: c.commented_at, key: `c${c.id}`, comment: c })),
+    ];
+    items.sort((a, b) => (a.t < b.t ? 1 : a.t > b.t ? -1 : 0));
+    return items;
+  }, [records, comments]);
 
   // Initialise the time field to "now" on the client (avoids SSR/CSR mismatch).
   useEffect(() => {
@@ -123,9 +206,10 @@ export default function Home({ loaderData }: Route.ComponentProps) {
     setManualText(nowLocalSlash());
   }, []);
 
-  // Focus the drug-name field whenever the form (re)mounts.
+  // Focus the first field whenever the form (re)mounts.
   useEffect(() => {
-    drugRef.current?.focus();
+    if (mode === "record") drugRef.current?.focus();
+    else bodyRef.current?.focus();
   }, [formKey]);
 
   // After a successful submit, reset the form back to a fresh "create" state.
@@ -136,17 +220,45 @@ export default function Home({ loaderData }: Route.ComponentProps) {
     }
     if (!busyRef.current) return;
     busyRef.current = false;
-    if (fetcher.data?.ok) {
-      setEditing(null);
-      setTakenAt(nowLocalInputValue());
-      setManualText(nowLocalSlash());
-      setTakenError("");
-      setFormKey((k) => k + 1);
-    }
+    if (fetcher.data?.ok) resetForm();
   }, [fetcher.state, fetcher.data]);
 
+  function resetForm() {
+    setEditing(null);
+    setEditingComment(null);
+    setCommentMentions([]);
+    setTakenError("");
+    setTakenAt(nowLocalInputValue());
+    setManualText(nowLocalSlash());
+    setFormKey((k) => k + 1);
+  }
+
+  function setNow() {
+    setTakenAt(nowLocalInputValue());
+    setManualText(nowLocalSlash());
+  }
+
+  function toggleManual(checked: boolean) {
+    if (checked) {
+      setManualText(isoToSlash(takenAt));
+    } else {
+      const picker = normalizeLocalInput(manualText)?.slice(0, 16);
+      if (picker) setTakenAt(picker);
+    }
+    setManualTime(checked);
+  }
+
+  function switchMode(m: Mode) {
+    if (m === mode) return;
+    setMode(m);
+    resetForm();
+  }
+
   function startEdit(r: Rec) {
+    setMode("record");
     setEditing(r);
+    setEditingComment(null);
+    setCommentMentions([]);
     setTakenAt(r.taken_at.slice(0, 16));
     setManualText(isoToSlash(r.taken_at));
     setTakenError(r.taken_error_min != null ? String(r.taken_error_min) : "");
@@ -154,35 +266,88 @@ export default function Home({ loaderData }: Route.ComponentProps) {
     window.scrollTo({ top: 0, behavior: "smooth" });
   }
 
-  function cancelEdit() {
+  function startEditComment(c: Comment) {
+    setMode("comment");
+    setEditingComment(c);
     setEditing(null);
-    setTakenAt(nowLocalInputValue());
-    setManualText(nowLocalSlash());
-    setTakenError("");
+    setCommentMentions(c.mentions);
+    setTakenAt(c.commented_at.slice(0, 16));
+    setManualText(isoToSlash(c.commented_at));
+    setTakenError(
+      c.commented_error_min != null ? String(c.commented_error_min) : "",
+    );
     setFormKey((k) => k + 1);
+    window.scrollTo({ top: 0, behavior: "smooth" });
   }
 
-  function toggleManual(checked: boolean) {
-    if (checked) {
-      // entering manual mode: seed the text box from the picker value
-      setManualText(isoToSlash(takenAt));
+  function commentOnRecord(r: Rec) {
+    if (mode === "comment") {
+      // accumulate a mention onto the in-progress OR edited comment (keeps body)
+      setCommentMentions((cur) => (cur.includes(r.id) ? cur : [...cur, r.id]));
     } else {
-      // leaving manual mode: apply the typed text back to the picker if valid
-      const picker = normalizeLocalInput(manualText)?.slice(0, 16);
-      if (picker) setTakenAt(picker);
+      setMode("comment");
+      setEditing(null);
+      setEditingComment(null);
+      setCommentMentions([r.id]);
+      setTakenError("");
+      setNow();
+      setFormKey((k) => k + 1);
     }
-    setManualTime(checked);
+    window.scrollTo({ top: 0, behavior: "smooth" });
+    window.setTimeout(() => bodyRef.current?.focus(), 0);
+  }
+
+  function removeMention(rid: number) {
+    setCommentMentions((cur) => cur.filter((x) => x !== rid));
+  }
+
+  function highlightRecord(rid: number) {
+    setHighlightId(rid);
+    document.getElementById(`rec-${rid}`)?.scrollIntoView({
+      behavior: "smooth",
+      block: "center",
+    });
+    window.setTimeout(
+      () => setHighlightId((cur) => (cur === rid ? null : cur)),
+      1600,
+    );
   }
 
   const units = Array.from(new Set([...COMMON_UNITS, ...suggestions.units]));
   const submitting = fetcher.state !== "idle";
   const errorMsg = fetcher.data && !fetcher.data.ok ? fetcher.data.error : null;
+  const isEditing = editing !== null || editingComment !== null;
+  const intentValue =
+    mode === "record"
+      ? editing
+        ? "update"
+        : "create"
+      : editingComment
+        ? "comment_update"
+        : "comment_create";
+  const editId = mode === "record" ? editing?.id : editingComment?.id;
+  const submitLabel =
+    mode === "record"
+      ? editing
+        ? "更新する"
+        : "記録する"
+      : editingComment
+        ? "更新する"
+        : "コメントする";
 
   return (
     <main className="mx-auto max-w-xl px-4 pb-24">
       <header className="flex items-baseline justify-between py-4">
         <h1 className="text-2xl font-bold tracking-tight">drec</h1>
-        <span className="text-sm text-gray-500">服薬記録</span>
+        <div className="flex items-baseline gap-3">
+          <span className="text-sm text-gray-500">服薬記録</span>
+          <Link
+            to="/logs"
+            className="text-xs text-gray-300 hover:text-gray-600"
+          >
+            ログ
+          </Link>
+        </div>
       </header>
 
       <fetcher.Form
@@ -190,152 +355,174 @@ export default function Home({ loaderData }: Route.ComponentProps) {
         method="post"
         className="rounded-2xl border border-gray-200 bg-white p-4 shadow-sm"
       >
-        <input type="hidden" name="intent" value={editing ? "update" : "create"} />
-        {editing && <input type="hidden" name="id" value={editing.id} />}
+        <input type="hidden" name="intent" value={intentValue} />
+        {isEditing && editId != null && (
+          <input type="hidden" name="id" value={editId} />
+        )}
 
-        <label className="block">
-          <span className="text-sm font-medium text-gray-700">薬剤名 *</span>
-          <input
-            ref={drugRef}
-            name="drug_name"
-            defaultValue={editing?.drug_name ?? ""}
-            list="drugs"
-            required
-            autoComplete="off"
-            placeholder="例: ロキソプロフェン"
-            className={inputClass}
-          />
-        </label>
-
-        <label className="mt-3 block">
-          <span className="text-sm font-medium text-gray-700">製品名</span>
-          <input
-            name="product_name"
-            defaultValue={editing?.product_name ?? ""}
-            list="products"
-            autoComplete="off"
-            placeholder="例: ロキソニン"
-            className={inputClass}
-          />
-        </label>
-
-        <div className="mt-3 grid grid-cols-2 gap-3">
-          <label className="block">
-            <span className="text-sm font-medium text-gray-700">量</span>
-            <input
-              name="amount"
-              type="number"
-              step="0.01"
-              inputMode="decimal"
-              defaultValue={editing?.amount ?? ""}
-              placeholder="例: 60"
-              className={inputClass}
-            />
-          </label>
-          <label className="block">
-            <span className="text-sm font-medium text-gray-700">単位</span>
-            <input
-              name="unit"
-              defaultValue={editing?.unit ?? ""}
-              list="units"
-              autoComplete="off"
-              placeholder="例: mg"
-              className={inputClass}
-            />
-          </label>
-        </div>
-
-        <div className="mt-3">
-          <span className="text-sm font-medium text-gray-700">服用時刻 *</span>
-          <div className="mt-1 flex items-center gap-2">
-            <input
-              type="checkbox"
-              checked={manualTime}
-              onChange={(e) => toggleManual(e.target.checked)}
-              className="h-5 w-5 shrink-0 rounded border-gray-300"
-            />
-            {manualTime ? (
-              <input
-                name="taken_at"
-                type="text"
-                required
-                value={manualText}
-                onChange={(e) => setManualText(e.target.value)}
-                placeholder="2026/06/27 14:20"
-                className="w-full rounded-lg border border-gray-300 px-3 py-2 text-base outline-none focus:border-gray-900"
-              />
-            ) : (
-              <input
-                name="taken_at"
-                type="datetime-local"
-                step="60"
-                required
-                value={takenAt}
-                onChange={(e) => setTakenAt(e.target.value)}
-                className="w-full rounded-lg border border-gray-300 px-3 py-2 text-base outline-none focus:border-gray-900"
-              />
-            )}
-            <button
-              type="button"
-              onClick={() => {
-                setTakenAt(nowLocalInputValue());
-                setManualText(nowLocalSlash());
-              }}
-              className="shrink-0 rounded-lg border border-gray-300 px-3 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50"
-            >
-              今
-            </button>
+        {!isEditing && (
+          <div className="mb-3 inline-flex rounded-lg border border-gray-300 p-0.5">
+            {(["record", "comment"] as const).map((m) => (
+              <button
+                key={m}
+                type="button"
+                onClick={() => switchMode(m)}
+                className={`rounded-md px-4 py-1 text-sm font-medium ${
+                  mode === m ? "bg-gray-900 text-white" : "text-gray-600"
+                }`}
+              >
+                {m === "record" ? "記録" : "コメント"}
+              </button>
+            ))}
           </div>
-        </div>
+        )}
 
-        <div className="mt-3">
-          <span className="text-sm font-medium text-gray-700">時刻の誤差（±分）</span>
-          <div className="mt-1 flex items-center gap-2">
-            <input
-              name="taken_error_min"
-              type="number"
-              min="0"
-              step="1"
-              inputMode="numeric"
-              value={takenError}
-              onChange={(e) => setTakenError(e.target.value)}
-              placeholder="任意"
-              className="w-20 rounded-lg border border-gray-300 px-3 py-2 text-base outline-none focus:border-gray-900"
-            />
-            <div className="flex gap-1">
-              {[5, 10, 30, 60].map((n) => {
-                const active = takenError === String(n);
-                return (
-                  <button
-                    key={n}
-                    type="button"
-                    onClick={() =>
-                      setTakenError((cur) => (cur === String(n) ? "" : String(n)))
-                    }
-                    className={`rounded-lg border px-3 py-2 text-sm font-medium ${
-                      active
-                        ? "border-gray-900 bg-gray-900 text-white"
-                        : "border-gray-300 text-gray-700 hover:bg-gray-50"
-                    }`}
-                  >
-                    ±{n}
-                  </button>
-                );
-              })}
+        {mode === "record" ? (
+          <>
+            <label className="block">
+              <span className="text-sm font-medium text-gray-700">薬剤名 *</span>
+              <input
+                ref={drugRef}
+                name="drug_name"
+                defaultValue={editing?.drug_name ?? ""}
+                list="drugs"
+                required
+                autoComplete="off"
+                placeholder="例: ロキソプロフェン"
+                className={inputClass}
+              />
+            </label>
+
+            <label className="mt-3 block">
+              <span className="text-sm font-medium text-gray-700">製品名</span>
+              <input
+                name="product_name"
+                defaultValue={editing?.product_name ?? ""}
+                list="products"
+                autoComplete="off"
+                placeholder="例: ロキソニン"
+                className={inputClass}
+              />
+            </label>
+
+            <div className="mt-3 grid grid-cols-2 gap-3">
+              <label className="block">
+                <span className="text-sm font-medium text-gray-700">量</span>
+                <input
+                  name="amount"
+                  type="number"
+                  step="0.01"
+                  inputMode="decimal"
+                  defaultValue={editing?.amount ?? ""}
+                  placeholder="例: 60"
+                  className={inputClass}
+                />
+              </label>
+              <label className="block">
+                <span className="text-sm font-medium text-gray-700">単位</span>
+                <input
+                  name="unit"
+                  defaultValue={editing?.unit ?? ""}
+                  list="units"
+                  autoComplete="off"
+                  placeholder="例: mg"
+                  className={inputClass}
+                />
+              </label>
             </div>
-          </div>
-        </div>
 
-        <label className="mt-3 block">
-          <span className="text-sm font-medium text-gray-700">備考</span>
-          <input
-            name="note"
-            defaultValue={editing?.note ?? ""}
-            autoComplete="off"
-            placeholder="例: 食後 / 頭痛のため"
-            className={inputClass}
-          />
-        </label>
+            <TimeField
+              label="服用時刻 *"
+              manualTime={manualTime}
+              manualText={manualText}
+              takenAt={takenAt}
+              onToggleManual={toggleManual}
+              onManualText={setManualText}
+              onTakenAt={setTakenAt}
+              onNow={setNow}
+            />
+
+            <ErrorField value={takenError} onChange={setTakenError} />
+
+            <label className="mt-3 block">
+              <span className="text-sm font-medium text-gray-700">備考</span>
+              <input
+                name="note"
+                defaultValue={editing?.note ?? ""}
+                autoComplete="off"
+                placeholder="例: 食後 / 頭痛のため"
+                className={inputClass}
+              />
+            </label>
+          </>
+        ) : (
+          <>
+            <input
+              type="hidden"
+              name="mentions"
+              value={commentMentions.join(",")}
+            />
+            <label className="block">
+              <span className="text-sm font-medium text-gray-700">コメント *</span>
+              <textarea
+                ref={bodyRef}
+                name="body"
+                defaultValue={editingComment?.body ?? ""}
+                required
+                rows={3}
+                placeholder="例: この後めまい。少し様子見。"
+                className="mt-1 w-full rounded-lg border border-gray-300 px-3 py-2 text-base outline-none focus:border-gray-900"
+              />
+            </label>
+
+            {commentMentions.length > 0 && (
+              <div className="mt-3">
+                <span className="text-sm font-medium text-gray-700">
+                  メンション
+                </span>
+                <div className="mt-1 flex flex-wrap gap-1.5">
+                  {commentMentions.map((rid) => {
+                    const rec = recordsById.get(rid);
+                    return (
+                      <span
+                        key={rid}
+                        className="inline-flex items-center gap-1 rounded-full bg-gray-100 px-2.5 py-1 text-xs text-gray-700"
+                      >
+                        💊 {rec ? rec.drug_name : `記録 #${rid}`}
+                        {rec && (
+                          <span className="text-gray-400">
+                            {formatTaken(rec.taken_at)}
+                          </span>
+                        )}
+                        <button
+                          type="button"
+                          onClick={() => removeMention(rid)}
+                          className="ml-0.5 text-gray-400 hover:text-gray-700"
+                          aria-label="メンションを外す"
+                        >
+                          ×
+                        </button>
+                      </span>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
+            <TimeField
+              label="コメント時刻 *"
+              manualTime={manualTime}
+              manualText={manualText}
+              takenAt={takenAt}
+              onToggleManual={toggleManual}
+              onManualText={setManualText}
+              onTakenAt={setTakenAt}
+              onNow={setNow}
+            />
+
+            <ErrorField value={takenError} onChange={setTakenError} />
+          </>
+        )}
 
         {errorMsg && <p className="mt-3 text-sm text-red-600">{errorMsg}</p>}
 
@@ -345,12 +532,12 @@ export default function Home({ loaderData }: Route.ComponentProps) {
             disabled={submitting}
             className="flex-1 rounded-lg bg-gray-900 px-4 py-2.5 text-base font-semibold text-white disabled:opacity-50"
           >
-            {editing ? "更新する" : "記録する"}
+            {submitLabel}
           </button>
-          {editing && (
+          {isEditing && (
             <button
               type="button"
-              onClick={cancelEdit}
+              onClick={resetForm}
               className="rounded-lg border border-gray-300 px-4 py-2.5 text-base font-medium text-gray-700 hover:bg-gray-50"
             >
               キャンセル
@@ -376,26 +563,37 @@ export default function Home({ loaderData }: Route.ComponentProps) {
       </datalist>
 
       <section className="mt-6">
-        {records.length === 0 ? (
+        {timeline.length === 0 ? (
           <p className="py-12 text-center text-gray-400">まだ記録がありません</p>
         ) : (
           <ul className="space-y-2">
-            {records.map((r, i) => {
+            {timeline.map((item, i) => {
               const showHeader =
-                i === 0 ||
-                dateKey(r.taken_at) !== dateKey(records[i - 1].taken_at);
+                i === 0 || dateKey(item.t) !== dateKey(timeline[i - 1].t);
               return (
-                <Fragment key={r.id}>
+                <Fragment key={item.key}>
                   {showHeader && (
                     <li className="px-1 pt-3 text-sm font-semibold text-gray-500">
-                      {formatDateHeader(r.taken_at)}
+                      {formatDateHeader(item.t)}
                     </li>
                   )}
-                  <RecordRow
-                    r={r}
-                    editing={editing?.id === r.id}
-                    onEdit={startEdit}
-                  />
+                  {item.kind === "record" ? (
+                    <RecordRow
+                      r={item.rec}
+                      editing={editing?.id === item.rec.id}
+                      highlighted={highlightId === item.rec.id}
+                      onEdit={startEdit}
+                      onComment={commentOnRecord}
+                    />
+                  ) : (
+                    <CommentRow
+                      c={item.comment}
+                      editing={editingComment?.id === item.comment.id}
+                      recordsById={recordsById}
+                      onEdit={startEditComment}
+                      onMentionClick={highlightRecord}
+                    />
+                  )}
                 </Fragment>
               );
             })}
@@ -406,14 +604,126 @@ export default function Home({ loaderData }: Route.ComponentProps) {
   );
 }
 
+function TimeField({
+  label,
+  manualTime,
+  manualText,
+  takenAt,
+  onToggleManual,
+  onManualText,
+  onTakenAt,
+  onNow,
+}: {
+  label: string;
+  manualTime: boolean;
+  manualText: string;
+  takenAt: string;
+  onToggleManual: (checked: boolean) => void;
+  onManualText: (v: string) => void;
+  onTakenAt: (v: string) => void;
+  onNow: () => void;
+}) {
+  return (
+    <div className="mt-3">
+      <span className="text-sm font-medium text-gray-700">{label}</span>
+      <div className="mt-1 flex items-center gap-2">
+        <input
+          type="checkbox"
+          checked={manualTime}
+          onChange={(e) => onToggleManual(e.target.checked)}
+          className="h-5 w-5 shrink-0 rounded border-gray-300"
+        />
+        {manualTime ? (
+          <input
+            name="taken_at"
+            type="text"
+            required
+            value={manualText}
+            onChange={(e) => onManualText(e.target.value)}
+            placeholder="2026/06/27 14:20"
+            className="w-full rounded-lg border border-gray-300 px-3 py-2 text-base outline-none focus:border-gray-900"
+          />
+        ) : (
+          <input
+            name="taken_at"
+            type="datetime-local"
+            step="60"
+            required
+            value={takenAt}
+            onChange={(e) => onTakenAt(e.target.value)}
+            className="w-full rounded-lg border border-gray-300 px-3 py-2 text-base outline-none focus:border-gray-900"
+          />
+        )}
+        <button
+          type="button"
+          onClick={onNow}
+          className="shrink-0 rounded-lg border border-gray-300 px-3 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50"
+        >
+          今
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function ErrorField({
+  value,
+  onChange,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+}) {
+  return (
+    <div className="mt-3">
+      <span className="text-sm font-medium text-gray-700">時刻の誤差（±分）</span>
+      <div className="mt-1 flex items-center gap-2">
+        <input
+          name="taken_error_min"
+          type="number"
+          min="0"
+          step="1"
+          inputMode="numeric"
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          placeholder="任意"
+          className="w-20 rounded-lg border border-gray-300 px-3 py-2 text-base outline-none focus:border-gray-900"
+        />
+        <div className="flex gap-1">
+          {[5, 10, 30, 60].map((n) => {
+            const active = value === String(n);
+            return (
+              <button
+                key={n}
+                type="button"
+                onClick={() => onChange(value === String(n) ? "" : String(n))}
+                className={`rounded-lg border px-3 py-2 text-sm font-medium ${
+                  active
+                    ? "border-gray-900 bg-gray-900 text-white"
+                    : "border-gray-300 text-gray-700 hover:bg-gray-50"
+                }`}
+              >
+                ±{n}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function RecordRow({
   r,
   editing,
+  highlighted,
   onEdit,
+  onComment,
 }: {
   r: Rec;
   editing: boolean;
+  highlighted: boolean;
   onEdit: (r: Rec) => void;
+  onComment: (r: Rec) => void;
 }) {
   const del = useFetcher();
   const again = useFetcher();
@@ -442,8 +752,13 @@ function RecordRow({
 
   return (
     <li
-      className={`rounded-xl border bg-white p-3 shadow-sm transition ${
-        editing ? "border-gray-900" : "border-gray-200"
+      id={`rec-${r.id}`}
+      className={`scroll-mt-4 rounded-xl border bg-white p-3 shadow-sm transition ${
+        editing
+          ? "border-gray-900"
+          : highlighted
+            ? "border-amber-400 ring-2 ring-amber-300"
+            : "border-gray-200"
       } ${busy ? "opacity-40" : ""}`}
     >
       <div className="flex items-start justify-between gap-3">
@@ -471,14 +786,23 @@ function RecordRow({
         </div>
 
         <div className="flex shrink-0 flex-col items-end gap-1">
-          <button
-            type="button"
-            onClick={recordAgain}
-            disabled={busy}
-            className="rounded-md px-2 py-1 text-xs font-medium text-gray-700 hover:bg-gray-100"
-          >
-            もう一度
-          </button>
+          <div className="flex gap-1">
+            <button
+              type="button"
+              onClick={recordAgain}
+              disabled={busy}
+              className="rounded-md px-2 py-1 text-xs font-medium text-gray-700 hover:bg-gray-100"
+            >
+              もう一度
+            </button>
+            <button
+              type="button"
+              onClick={() => onComment(r)}
+              className="rounded-md px-2 py-1 text-xs font-medium text-gray-700 hover:bg-gray-100"
+            >
+              コメント
+            </button>
+          </div>
           <div className="flex gap-1">
             <button
               type="button"
@@ -514,6 +838,110 @@ function RecordRow({
               </>
             )}
           </div>
+        </div>
+      </div>
+    </li>
+  );
+}
+
+function CommentRow({
+  c,
+  editing,
+  recordsById,
+  onEdit,
+  onMentionClick,
+}: {
+  c: Comment;
+  editing: boolean;
+  recordsById: Map<number, Rec>;
+  onEdit: (c: Comment) => void;
+  onMentionClick: (id: number) => void;
+}) {
+  const del = useFetcher();
+  const [confirming, setConfirming] = useState(false);
+  const busy = del.state !== "idle";
+
+  function remove() {
+    setConfirming(false);
+    del.submit({ intent: "comment_delete", id: String(c.id) }, { method: "post" });
+  }
+
+  return (
+    <li
+      className={`rounded-xl border bg-amber-50 p-3 shadow-sm transition ${
+        editing ? "border-gray-900" : "border-amber-200"
+      } ${busy ? "opacity-40" : ""}`}
+    >
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <div className="flex items-center gap-1.5 text-xs font-medium text-amber-700">
+            <span>💬 コメント</span>
+            <span className="text-gray-400">
+              {formatTaken(c.commented_at)}
+              {c.commented_error_min != null && ` ±${c.commented_error_min}分`}
+            </span>
+          </div>
+          <div className="mt-1 whitespace-pre-wrap break-words text-sm text-gray-800">
+            {c.body}
+          </div>
+          {c.mentions.length > 0 && (
+            <div className="mt-2 flex flex-wrap gap-1.5">
+              {c.mentions.map((rid) => {
+                const rec = recordsById.get(rid);
+                return (
+                  <button
+                    key={rid}
+                    type="button"
+                    onClick={() => onMentionClick(rid)}
+                    className="inline-flex items-center gap-1 rounded-full bg-white px-2.5 py-1 text-xs text-gray-700 ring-1 ring-amber-200 hover:bg-amber-100"
+                  >
+                    💊 {rec ? rec.drug_name : `記録 #${rid}`}
+                    {rec && (
+                      <span className="text-gray-400">
+                        {formatTaken(rec.taken_at)}
+                      </span>
+                    )}
+                  </button>
+                );
+              })}
+            </div>
+          )}
+        </div>
+
+        <div className="flex shrink-0 flex-col items-end gap-1">
+          <button
+            type="button"
+            onClick={() => onEdit(c)}
+            className="rounded-md px-2 py-1 text-xs font-medium text-gray-700 hover:bg-amber-100"
+          >
+            編集
+          </button>
+          {!confirming ? (
+            <button
+              type="button"
+              onClick={() => setConfirming(true)}
+              className="rounded-md px-2 py-1 text-xs font-medium text-gray-500 hover:bg-amber-100"
+            >
+              削除
+            </button>
+          ) : (
+            <div className="flex gap-1">
+              <button
+                type="button"
+                onClick={remove}
+                className="rounded-md bg-red-600 px-2 py-1 text-xs font-medium text-white"
+              >
+                削除する
+              </button>
+              <button
+                type="button"
+                onClick={() => setConfirming(false)}
+                className="rounded-md px-2 py-1 text-xs font-medium text-gray-500 hover:bg-amber-100"
+              >
+                やめる
+              </button>
+            </div>
+          )}
         </div>
       </div>
     </li>
