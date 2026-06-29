@@ -92,17 +92,25 @@ export function formatDuration(ms: number): string {
   return `${m}m`;
 }
 
+/** Signed compact duration: "+2h30m" / "-2h30m" / "0m" (no sign within a minute). */
+export function signedDuration(ms: number): string {
+  const body = formatDuration(ms);
+  return body === "0m" ? body : `${ms >= 0 ? "+" : "-"}${body}`;
+}
+
 const MAX_AGO_MS = 72 * 60 * 60 * 1000; // 72 hours
 
-/** "2h30m前" when the time is within the last 72h (and not in the future), else null. */
+/** Signed offset from now ("-2h30m" for past) within the last 72h, else null.
+ *  Future times are hidden. */
 export function agoLabel(iso: string, nowMs: number): string | null {
-  const elapsed = nowMs - parseLocal(iso).getTime();
-  if (elapsed < 0 || elapsed > MAX_AGO_MS) return null;
-  return `${formatDuration(elapsed)}前`;
+  const diff = parseLocal(iso).getTime() - nowMs; // negative = past
+  if (diff > 0 || diff < -MAX_AGO_MS) return null;
+  return signedDuration(diff);
 }
 
 /** Signed offset of a comment from a referenced record: "+2h30m" / "-2h30m". */
 export function mentionDiffLabel(commentIso: string, recordIso: string): string {
-  const diff = parseLocal(commentIso).getTime() - parseLocal(recordIso).getTime();
-  return `${diff >= 0 ? "+" : "-"}${formatDuration(diff)}`;
+  return signedDuration(
+    parseLocal(commentIso).getTime() - parseLocal(recordIso).getTime(),
+  );
 }

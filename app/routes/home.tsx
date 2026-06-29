@@ -209,10 +209,10 @@ export default function Home({ loaderData }: Route.ComponentProps) {
     setManualText(nowLocalSlash());
   }, []);
 
-  // Tick the clock on the client so the "Xh Ym 前" labels stay fresh.
+  // Tick the clock every second so the relative-time labels update in real time.
   useEffect(() => {
     setNowMs(Date.now());
-    const t = window.setInterval(() => setNowMs(Date.now()), 60000);
+    const t = window.setInterval(() => setNowMs(Date.now()), 1000);
     return () => window.clearInterval(t);
   }, []);
 
