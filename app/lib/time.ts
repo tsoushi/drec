@@ -82,14 +82,17 @@ export function dateKey(s: string): string {
   return s.slice(0, 10);
 }
 
-/** Absolute duration as a compact string: "2h30m" / "2h" / "30m". */
+/** Absolute duration as a compact string: "3d2h30m" / "2h30m" / "3d" / "30m". */
 export function formatDuration(ms: number): string {
   const totalMin = Math.floor(Math.abs(ms) / 60000);
-  const h = Math.floor(totalMin / 60);
+  const d = Math.floor(totalMin / 1440);
+  const h = Math.floor((totalMin % 1440) / 60);
   const m = totalMin % 60;
-  if (h > 0 && m > 0) return `${h}h${m}m`;
-  if (h > 0) return `${h}h`;
-  return `${m}m`;
+  let s = "";
+  if (d > 0) s += `${d}d`;
+  if (h > 0) s += `${h}h`;
+  if (m > 0 || s === "") s += `${m}m`;
+  return s;
 }
 
 /** Signed compact duration: "+2h30m" / "-2h30m" / "0m" (no sign within a minute). */
@@ -98,14 +101,9 @@ export function signedDuration(ms: number): string {
   return body === "0m" ? body : `${ms >= 0 ? "+" : "-"}${body}`;
 }
 
-const MAX_AGO_MS = 72 * 60 * 60 * 1000; // 72 hours
-
-/** Signed offset from now ("-2h30m" for past) within the last 72h, else null.
- *  Future times are hidden. */
-export function agoLabel(iso: string, nowMs: number): string | null {
-  const diff = parseLocal(iso).getTime() - nowMs; // negative = past
-  if (diff > 0 || diff < -MAX_AGO_MS) return null;
-  return signedDuration(diff);
+/** Signed offset from now ("-3d2h30m" for past, "+30m" for future) — all records. */
+export function agoLabel(iso: string, nowMs: number): string {
+  return signedDuration(parseLocal(iso).getTime() - nowMs);
 }
 
 /** Signed offset of a comment from a referenced record: "+2h30m" / "-2h30m". */
