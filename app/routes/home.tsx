@@ -795,7 +795,7 @@ function RecordRow({
           </div>
           <div className="mt-0.5 text-sm text-gray-500">
             {formatTaken(r.taken_at)}
-            {r.taken_error_min != null && ` ±${r.taken_error_min}分`}
+            {r.taken_error_min != null && ` ±${r.taken_error_min}m`}
             {ago && <span className="ml-2 text-gray-400">{ago}</span>}
           </div>
           {r.note && <div className="mt-1 text-sm text-gray-700">{r.note}</div>}
@@ -897,7 +897,7 @@ function CommentRow({
             <span>💬 コメント</span>
             <span className="text-gray-400">
               {formatTaken(c.commented_at)}
-              {c.commented_error_min != null && ` ±${c.commented_error_min}分`}
+              {c.commented_error_min != null && ` ±${c.commented_error_min}m`}
               {ago && <span className="ml-2">{ago}</span>}
             </span>
           </div>
