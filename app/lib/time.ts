@@ -81,3 +81,28 @@ export function formatDateHeader(s: string): string {
 export function dateKey(s: string): string {
   return s.slice(0, 10);
 }
+
+/** Absolute duration as a compact string: "2h30m" / "2h" / "30m". */
+export function formatDuration(ms: number): string {
+  const totalMin = Math.floor(Math.abs(ms) / 60000);
+  const h = Math.floor(totalMin / 60);
+  const m = totalMin % 60;
+  if (h > 0 && m > 0) return `${h}h${m}m`;
+  if (h > 0) return `${h}h`;
+  return `${m}m`;
+}
+
+const MAX_AGO_MS = 72 * 60 * 60 * 1000; // 72 hours
+
+/** "2h30m前" when the time is within the last 72h (and not in the future), else null. */
+export function agoLabel(iso: string, nowMs: number): string | null {
+  const elapsed = nowMs - parseLocal(iso).getTime();
+  if (elapsed < 0 || elapsed > MAX_AGO_MS) return null;
+  return `${formatDuration(elapsed)}前`;
+}
+
+/** Signed offset of a comment from a referenced record: "+2h30m" / "-2h30m". */
+export function mentionDiffLabel(commentIso: string, recordIso: string): string {
+  const diff = parseLocal(commentIso).getTime() - parseLocal(recordIso).getTime();
+  return `${diff >= 0 ? "+" : "-"}${formatDuration(diff)}`;
+}

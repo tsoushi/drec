@@ -20,10 +20,12 @@ import {
   type CommentInput,
 } from "../db/comments.server";
 import {
+  agoLabel,
   dateKey,
   formatDateHeader,
   formatTaken,
   isoToSlash,
+  mentionDiffLabel,
   normalizeLocalInput,
   nowLocalInputValue,
   nowLocalSlash,
@@ -176,6 +178,7 @@ export default function Home({ loaderData }: Route.ComponentProps) {
   const [commentMentions, setCommentMentions] = useState<number[]>([]);
   const [highlightId, setHighlightId] = useState<number | null>(null);
   const [formKey, setFormKey] = useState(0);
+  const [nowMs, setNowMs] = useState<number | null>(null);
 
   const drugRef = useRef<HTMLInputElement>(null);
   const bodyRef = useRef<HTMLTextAreaElement>(null);
@@ -204,6 +207,13 @@ export default function Home({ loaderData }: Route.ComponentProps) {
   useEffect(() => {
     setTakenAt(nowLocalInputValue());
     setManualText(nowLocalSlash());
+  }, []);
+
+  // Tick the clock on the client so the "Xh Ym 前" labels stay fresh.
+  useEffect(() => {
+    setNowMs(Date.now());
+    const t = window.setInterval(() => setNowMs(Date.now()), 60000);
+    return () => window.clearInterval(t);
   }, []);
 
   // Focus the first field whenever the form (re)mounts.
@@ -582,6 +592,7 @@ export default function Home({ loaderData }: Route.ComponentProps) {
                       r={item.rec}
                       editing={editing?.id === item.rec.id}
                       highlighted={highlightId === item.rec.id}
+                      nowMs={nowMs}
                       onEdit={startEdit}
                       onComment={commentOnRecord}
                     />
@@ -590,6 +601,7 @@ export default function Home({ loaderData }: Route.ComponentProps) {
                       c={item.comment}
                       editing={editingComment?.id === item.comment.id}
                       recordsById={recordsById}
+                      nowMs={nowMs}
                       onEdit={startEditComment}
                       onMentionClick={highlightRecord}
                     />
@@ -716,12 +728,14 @@ function RecordRow({
   r,
   editing,
   highlighted,
+  nowMs,
   onEdit,
   onComment,
 }: {
   r: Rec;
   editing: boolean;
   highlighted: boolean;
+  nowMs: number | null;
   onEdit: (r: Rec) => void;
   onComment: (r: Rec) => void;
 }) {
@@ -729,6 +743,7 @@ function RecordRow({
   const again = useFetcher();
   const [confirming, setConfirming] = useState(false);
   const busy = del.state !== "idle" || again.state !== "idle";
+  const ago = nowMs != null ? agoLabel(r.taken_at, nowMs) : null;
 
   function recordAgain() {
     again.submit(
@@ -781,6 +796,7 @@ function RecordRow({
           <div className="mt-0.5 text-sm text-gray-500">
             {formatTaken(r.taken_at)}
             {r.taken_error_min != null && ` ±${r.taken_error_min}分`}
+            {ago && <span className="ml-2 text-gray-400">{ago}</span>}
           </div>
           {r.note && <div className="mt-1 text-sm text-gray-700">{r.note}</div>}
         </div>
@@ -848,18 +864,21 @@ function CommentRow({
   c,
   editing,
   recordsById,
+  nowMs,
   onEdit,
   onMentionClick,
 }: {
   c: Comment;
   editing: boolean;
   recordsById: Map<number, Rec>;
+  nowMs: number | null;
   onEdit: (c: Comment) => void;
   onMentionClick: (id: number) => void;
 }) {
   const del = useFetcher();
   const [confirming, setConfirming] = useState(false);
   const busy = del.state !== "idle";
+  const ago = nowMs != null ? agoLabel(c.commented_at, nowMs) : null;
 
   function remove() {
     setConfirming(false);
@@ -879,6 +898,7 @@ function CommentRow({
             <span className="text-gray-400">
               {formatTaken(c.commented_at)}
               {c.commented_error_min != null && ` ±${c.commented_error_min}分`}
+              {ago && <span className="ml-2">{ago}</span>}
             </span>
           </div>
           <div className="mt-1 whitespace-pre-wrap break-words text-sm text-gray-800">
@@ -899,6 +919,11 @@ function CommentRow({
                     {rec && (
                       <span className="text-gray-400">
                         {formatTaken(rec.taken_at)}
+                      </span>
+                    )}
+                    {rec && (
+                      <span className="font-semibold text-amber-700">
+                        {mentionDiffLabel(c.commented_at, rec.taken_at)}
                       </span>
                     )}
                   </button>
