@@ -352,6 +352,12 @@ export default function Home({ loaderData }: Route.ComponentProps) {
         <div className="flex items-baseline gap-3">
           <span className="text-sm text-gray-500">服薬記録</span>
           <Link
+            to="/graph"
+            className="text-xs text-gray-300 hover:text-gray-600"
+          >
+            グラフ
+          </Link>
+          <Link
             to="/logs"
             className="text-xs text-gray-300 hover:text-gray-600"
           >
