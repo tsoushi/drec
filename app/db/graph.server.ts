@@ -1,7 +1,10 @@
 import { db } from "./db.server";
+import { nowLocalISO } from "../lib/time";
 
-// Read-only queries for the concentration-graph screen (routes/graph.tsx).
+// Queries for the concentration-graph screen (routes/graph.tsx).
 // Kept separate from records.server.ts so the screen stays independent.
+// Note: graph_settings stores view preferences (not medication data), so its
+// writes intentionally do NOT go through logChange.
 
 export type GraphDrug = {
   name: string;
@@ -31,9 +34,45 @@ const dosesStmt = db.prepare(
     ORDER BY taken_at`,
 );
 
-export function getGraphData(): { drugs: GraphDrug[]; doses: GraphDose[] } {
+export type GraphSettings = {
+  unit: number;
+  tmax_min: number;
+  half_min: number;
+  window_h: number;
+};
+
+const settingsStmt = db.prepare(
+  `SELECT drug_name, unit, tmax_min, half_min, window_h FROM graph_settings`,
+);
+
+const upsertSettingsStmt = db.prepare(
+  `INSERT INTO graph_settings (drug_name, unit, tmax_min, half_min, window_h, updated_at)
+   VALUES (@drug_name, @unit, @tmax_min, @half_min, @window_h, @updated_at)
+   ON CONFLICT(drug_name) DO UPDATE SET
+     unit = excluded.unit,
+     tmax_min = excluded.tmax_min,
+     half_min = excluded.half_min,
+     window_h = excluded.window_h,
+     updated_at = excluded.updated_at`,
+);
+
+export function getGraphData(): {
+  drugs: GraphDrug[];
+  doses: GraphDose[];
+  settings: Record<string, GraphSettings>;
+} {
+  const settings: Record<string, GraphSettings> = {};
+  for (const row of settingsStmt.all() as Array<GraphSettings & { drug_name: string }>) {
+    const { drug_name, ...rest } = row;
+    settings[drug_name] = rest;
+  }
   return {
     drugs: drugsStmt.all() as GraphDrug[],
     doses: dosesStmt.all() as GraphDose[],
+    settings,
   };
+}
+
+export function saveGraphSettings(drug: string, s: GraphSettings): void {
+  upsertSettingsStmt.run({ drug_name: drug, ...s, updated_at: nowLocalISO() });
 }

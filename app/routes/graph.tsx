@@ -1,8 +1,13 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Link } from "react-router";
+import { Link, useFetcher } from "react-router";
+import type { ShouldRevalidateFunctionArgs } from "react-router";
 
 import type { Route } from "./+types/graph";
-import { getGraphData } from "../db/graph.server";
+import {
+  getGraphData,
+  saveGraphSettings,
+  type GraphSettings,
+} from "../db/graph.server";
 import { formatTaken, isoToSlash, parseLocal } from "../lib/time";
 
 export function meta(_: Route.MetaArgs) {
@@ -11,6 +16,28 @@ export function meta(_: Route.MetaArgs) {
 
 export async function loader(_: Route.LoaderArgs) {
   return getGraphData();
+}
+
+// Settings saves don't change the graph's source data — skip revalidation.
+export function shouldRevalidate({
+  formMethod,
+  defaultShouldRevalidate,
+}: ShouldRevalidateFunctionArgs) {
+  if (formMethod && formMethod !== "GET") return false;
+  return defaultShouldRevalidate;
+}
+
+export async function action({ request }: Route.ActionArgs) {
+  const fd = await request.formData();
+  const drug = String(fd.get("drug_name") ?? "").trim();
+  if (!drug) return { ok: false as const };
+  saveGraphSettings(drug, {
+    unit: posNum(String(fd.get("unit") ?? ""), 10),
+    tmax_min: posNum(String(fd.get("tmax") ?? ""), 25),
+    half_min: posNum(String(fd.get("half") ?? ""), 60),
+    window_h: posNum(String(fd.get("win") ?? ""), 72),
+  });
+  return { ok: true as const };
 }
 
 // ---------------------------------------------------------------------------
@@ -66,13 +93,6 @@ function tickStepH(winH: number): number {
   return 336;
 }
 
-function hourLabel(h: number): string {
-  if (h === 0) return "0";
-  const sign = h > 0 ? "+" : "-";
-  const a = Math.abs(h);
-  return a % 24 === 0 ? `${sign}${a / 24}d` : `${sign}${a}h`;
-}
-
 function fmtNum(v: number): string {
   return String(parseFloat(v.toFixed(2)));
 }
@@ -84,33 +104,24 @@ function localIsoOf(ms: number): string {
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
 }
 
-// ---- per-drug cached settings ---------------------------------------------
-// Model/window params persist in localStorage (they are properties of the
-// drug); the reference time is only remembered per drug within the session.
+// ---- per-drug settings (persisted in the DB via action) --------------------
 
 type StoredParams = { unit: string; tmax: string; half: string; win: string };
 const DEFAULT_PARAMS: StoredParams = { unit: "10", tmax: "25", half: "60", win: "72" };
-const LS_PREFIX = "drec:graph:params:";
 
-function loadParams(drug: string): StoredParams {
-  try {
-    const raw = localStorage.getItem(LS_PREFIX + drug);
-    if (raw) return { ...DEFAULT_PARAMS, ...(JSON.parse(raw) as Partial<StoredParams>) };
-  } catch {
-    // ignore bad/blocked storage
-  }
-  return { ...DEFAULT_PARAMS };
-}
-
-function saveParams(drug: string, p: StoredParams): void {
-  try {
-    localStorage.setItem(LS_PREFIX + drug, JSON.stringify(p));
-  } catch {
-    // ignore
-  }
+function toStored(s: GraphSettings | undefined): StoredParams {
+  if (!s) return { ...DEFAULT_PARAMS };
+  return {
+    unit: String(s.unit),
+    tmax: String(s.tmax_min),
+    half: String(s.half_min),
+    win: String(s.window_h),
+  };
 }
 
 const HOUR = 3_600_000;
+// Fixed local-midnight anchor so wall-clock ticks keep a stable phase.
+const TICK_ANCHOR = new Date(2001, 0, 1).getTime();
 
 // SVG layout
 const W = 800;
@@ -126,16 +137,21 @@ const fieldClass =
   "mt-1 w-full rounded-lg border border-gray-300 px-3 py-2 text-base outline-none focus:border-gray-900";
 
 export default function Graph({ loaderData }: Route.ComponentProps) {
-  const { drugs, doses } = loaderData;
+  const { drugs, doses, settings } = loaderData;
 
   const [drugSel, setDrugSel] = useState<string | null>(null);
-  const [params, setParams] = useState<StoredParams>({ ...DEFAULT_PARAMS });
+  const drug = drugSel ?? drugs[0]?.name ?? "";
+  const [params, setParams] = useState<StoredParams>(() => toStored(settings[drug]));
   const [nowMs, setNowMs] = useState<number | null>(null);
   const [refMs, setRefMs] = useState<number | null>(null); // 基準時刻（グラフ中央）
   const [follow, setFollow] = useState(true); // 基準時刻を現在時刻に追従させるか
 
-  const drug = drugSel ?? drugs[0]?.name ?? "";
+  const saveFetcher = useFetcher();
+  // Latest settings edited this session (loader data goes stale after saves).
+  const sessionSettings = useRef(new Map<string, StoredParams>());
   const refCache = useRef(new Map<string, { ref: number; follow: boolean }>());
+  const saveTimer = useRef<number | null>(null);
+  const pendingSave = useRef<{ drug: string; p: StoredParams } | null>(null);
   const dragRef = useRef<{ pointerId: number; startX: number; startRef: number } | null>(null);
 
   // Client-only clock (avoids SSR/CSR mismatch); refresh every minute.
@@ -153,28 +169,54 @@ export default function Graph({ loaderData }: Route.ComponentProps) {
     return () => window.clearInterval(t);
   }, []);
 
-  // Restore cached settings whenever the selected drug changes (incl. mount).
-  useEffect(() => {
+  function paramsFor(name: string): StoredParams {
+    return sessionSettings.current.get(name) ?? toStored(settings[name]);
+  }
+
+  function submitSave(name: string, p: StoredParams) {
+    saveFetcher.submit(
+      { drug_name: name, unit: p.unit, tmax: p.tmax, half: p.half, win: p.win },
+      { method: "post" },
+    );
+  }
+
+  function flushSave() {
+    if (saveTimer.current != null) {
+      window.clearTimeout(saveTimer.current);
+      saveTimer.current = null;
+    }
+    const pending = pendingSave.current;
+    pendingSave.current = null;
+    if (pending) submitSave(pending.drug, pending.p);
+  }
+
+  /** Update one param field; persist to the DB (debounced). */
+  function updateParam(patch: Partial<StoredParams>) {
     if (!drug) return;
-    setParams(loadParams(drug));
-    const sess = refCache.current.get(drug);
+    const next = { ...params, ...patch };
+    setParams(next);
+    sessionSettings.current.set(drug, next);
+    pendingSave.current = { drug, p: next };
+    if (saveTimer.current != null) window.clearTimeout(saveTimer.current);
+    saveTimer.current = window.setTimeout(() => {
+      saveTimer.current = null;
+      const pending = pendingSave.current;
+      pendingSave.current = null;
+      if (pending) submitSave(pending.drug, pending.p);
+    }, 600);
+  }
+
+  /** Switch drug: flush pending save, remember the view, restore the target's. */
+  function switchDrug(name: string) {
+    flushSave();
+    if (drug && refMs != null) refCache.current.set(drug, { ref: refMs, follow });
+    setDrugSel(name);
+    setParams(paramsFor(name));
+    const sess = refCache.current.get(name);
     if (sess) {
       setRefMs(sess.ref);
       setFollow(sess.follow);
     }
-  }, [drug]);
-
-  /** Update one param field and persist the drug's settings. */
-  function updateParam(patch: Partial<StoredParams>) {
-    const next = { ...params, ...patch };
-    setParams(next);
-    if (drug) saveParams(drug, next);
-  }
-
-  /** Switch drug, remembering the current view (reference time) for this one. */
-  function switchDrug(name: string) {
-    if (drug && refMs != null) refCache.current.set(drug, { ref: refMs, follow });
-    setDrugSel(name);
   }
 
   function resetToNow() {
@@ -237,12 +279,23 @@ export default function Graph({ loaderData }: Route.ComponentProps) {
     const yLines: Array<{ v: number; y: number }> = [];
     for (let v = stepY; v <= yMax; v += stepY) yLines.push({ v, y: Y(v) });
 
+    // Wall-clock-anchored ticks: fixed absolute times, so they slide together
+    // with the curve while panning.
     const stepH = tickStepH(winH);
-    const k = Math.floor(winH / stepH);
-    const xTicks: Array<{ x: number; label: string }> = [];
-    for (let i = -k; i <= k; i++) {
-      const h = i * stepH;
-      xTicks.push({ x: X(refMs + h * HOUR), label: hourLabel(h) });
+    const stepMs = stepH * HOUR;
+    const first = TICK_ANCHOR + Math.ceil((from - TICK_ANCHOR) / stepMs) * stepMs;
+    const xTicks: Array<{ key: number; x: number; label: string; strong: boolean }> = [];
+    for (let t = first; t <= to; t += stepMs) {
+      const d = new Date(t);
+      const midnight = d.getHours() === 0 && d.getMinutes() === 0;
+      xTicks.push({
+        key: t,
+        x: X(t),
+        label: midnight || stepH >= 24
+          ? `${d.getMonth() + 1}/${d.getDate()}`
+          : `${d.getHours()}:00`,
+        strong: midnight,
+      });
     }
 
     const markers = drugDoses
@@ -282,6 +335,7 @@ export default function Graph({ loaderData }: Route.ComponentProps) {
   const totalOfDrug = drugs.find((d) => d.name === drug)?.count ?? 0;
   const excluded = totalOfDrug - drugDoses.length;
   const isAtNow = follow || (refMs != null && nowMs != null && Math.abs(refMs - nowMs) < 60_000);
+  const centerX = ML + PW / 2;
 
   return (
     <main className="mx-auto max-w-2xl px-4 pb-24">
@@ -417,30 +471,52 @@ export default function Graph({ loaderData }: Route.ComponentProps) {
                     </g>
                   ))}
 
-                  {/* vertical gridlines + labels (relative to reference) */}
+                  {/* wall-clock gridlines + labels (move together with the curve) */}
                   {chart.xTicks.map((t) => (
-                    <g key={t.label}>
+                    <g key={t.key}>
                       <line
                         x1={t.x}
                         y1={MT}
                         x2={t.x}
                         y2={MT + PH}
-                        stroke={t.label === "0" ? "#9ca3af" : "#f3f4f6"}
+                        stroke={t.strong ? "#e5e7eb" : "#f3f4f6"}
                         strokeWidth="1"
-                        strokeDasharray={t.label === "0" ? "4 3" : undefined}
                       />
                       <text
                         x={t.x}
                         y={H - MB + 14}
                         textAnchor="middle"
                         fontSize="10"
-                        fontWeight={t.label === "0" ? 700 : 400}
-                        fill={t.label === "0" ? "#374151" : "#9ca3af"}
+                        fontWeight={t.strong ? 700 : 400}
+                        fill="#9ca3af"
                       >
                         {t.label}
                       </text>
                     </g>
                   ))}
+
+                  {/* reference (center) line */}
+                  <line
+                    x1={centerX}
+                    y1={MT}
+                    x2={centerX}
+                    y2={MT + PH}
+                    stroke="#9ca3af"
+                    strokeWidth="1"
+                    strokeDasharray="4 3"
+                  />
+                  {!isAtNow && (
+                    <text
+                      x={centerX}
+                      y={MT + 9}
+                      textAnchor="middle"
+                      fontSize="10"
+                      fontWeight={700}
+                      fill="#6b7280"
+                    >
+                      基準
+                    </text>
+                  )}
 
                   {/* baseline */}
                   <line x1={ML} y1={MT + PH} x2={W - MR} y2={MT + PH} stroke="#d1d5db" strokeWidth="1" />
@@ -449,7 +525,7 @@ export default function Graph({ loaderData }: Route.ComponentProps) {
                   <path d={chart.area} fill="rgba(17,24,39,0.06)" stroke="none" />
                   <path d={chart.line} fill="none" stroke="#111827" strokeWidth="1.5" />
 
-                  {/* actual "now" line (stays put while panning) */}
+                  {/* actual "now" line (anchored to real time, slides while panning) */}
                   {nowX != null && (
                     <g>
                       <line

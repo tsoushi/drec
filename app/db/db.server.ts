@@ -61,6 +61,19 @@ const MIGRATIONS: Array<(db: Database.Database) => void> = [
   (db) => {
     db.exec(`ALTER TABLE comments ADD COLUMN commented_error_min INTEGER;`);
   },
+  // v5 — per-drug view settings for the concentration graph
+  (db) => {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS graph_settings (
+        drug_name  TEXT PRIMARY KEY,
+        unit       REAL NOT NULL,
+        tmax_min   REAL NOT NULL,
+        half_min   REAL NOT NULL,
+        window_h   REAL NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+    `);
+  },
 ];
 
 function migrate(db: Database.Database): void {
