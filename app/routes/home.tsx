@@ -358,6 +358,12 @@ export default function Home({ loaderData }: Route.ComponentProps) {
             グラフ
           </Link>
           <Link
+            to="/report"
+            className="text-xs text-gray-300 hover:text-gray-600"
+          >
+            レポート
+          </Link>
+          <Link
             to="/logs"
             className="text-xs text-gray-300 hover:text-gray-600"
           >
