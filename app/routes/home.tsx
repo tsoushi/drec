@@ -70,6 +70,11 @@ function parseInput(fd: FormData): { input?: RecordInput; error?: string } {
   const takenError =
     errNum !== null && Number.isFinite(errNum) ? Math.round(Math.abs(errNum)) : null;
 
+  const peakRaw = String(fd.get("peak_min") ?? "").trim();
+  const peakNum = peakRaw === "" ? null : Number(peakRaw);
+  const peakMin =
+    peakNum !== null && Number.isFinite(peakNum) && peakNum > 0 ? peakNum : null;
+
   return {
     input: {
       drug_name: drugName,
@@ -78,6 +83,7 @@ function parseInput(fd: FormData): { input?: RecordInput; error?: string } {
       unit: optional("unit"),
       taken_at: takenAt,
       taken_error_min: takenError,
+      peak_min: peakMin,
       note: optional("note"),
     },
   };
@@ -467,6 +473,20 @@ export default function Home({ loaderData }: Route.ComponentProps) {
             <ErrorField value={takenError} onChange={setTakenError} />
 
             <label className="mt-3 block">
+              <span className="text-sm font-medium text-gray-700">ピーク(分)</span>
+              <input
+                name="peak_min"
+                type="number"
+                min="1"
+                step="1"
+                inputMode="numeric"
+                defaultValue={editing?.peak_min ?? ""}
+                placeholder="任意（グラフでの最大到達時間。未入力は既定値）"
+                className={inputClass}
+              />
+            </label>
+
+            <label className="mt-3 block">
               <span className="text-sm font-medium text-gray-700">備考</span>
               <input
                 name="note"
@@ -766,6 +786,7 @@ function RecordRow({
         amount: r.amount != null ? String(r.amount) : "",
         unit: r.unit ?? "",
         taken_at: nowLocalInputValue(),
+        peak_min: r.peak_min != null ? String(r.peak_min) : "",
         note: "",
       },
       { method: "post" },

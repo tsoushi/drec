@@ -74,6 +74,25 @@ const MIGRATIONS: Array<(db: Database.Database) => void> = [
       );
     `);
   },
+  // v6 — drug groups ("tags") for the concentration graph
+  (db) => {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS graph_tags (
+        name       TEXT PRIMARY KEY,
+        created_at TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS graph_tag_drugs (
+        tag_name  TEXT NOT NULL,
+        drug_name TEXT NOT NULL,
+        PRIMARY KEY (tag_name, drug_name)
+      );
+    `);
+  },
+  // v7 — optional per-record peak time (minutes); graph falls back to the
+  // drug's default when NULL
+  (db) => {
+    db.exec(`ALTER TABLE records ADD COLUMN peak_min REAL;`);
+  },
 ];
 
 function migrate(db: Database.Database): void {

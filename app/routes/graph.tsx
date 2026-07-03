@@ -1,11 +1,15 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Link, useFetcher } from "react-router";
+import { Link, useFetcher, useSearchParams } from "react-router";
 import type { ShouldRevalidateFunctionArgs } from "react-router";
 
 import type { Route } from "./+types/graph";
 import {
+  createTag,
+  deleteTag,
   getGraphData,
   saveGraphSettings,
+  setTagDrug,
+  type GraphDose,
   type GraphSettings,
 } from "../db/graph.server";
 import { formatTaken, isoToSlash, parseLocal } from "../lib/time";
@@ -18,20 +22,44 @@ export async function loader(_: Route.LoaderArgs) {
   return getGraphData();
 }
 
-// Settings saves don't change the graph's source data — skip revalidation.
+// Settings saves don't change the loader data — skip revalidation for them.
+// Tag operations DO change it (tags list), so let those revalidate.
 export function shouldRevalidate({
   formMethod,
+  formData,
   defaultShouldRevalidate,
 }: ShouldRevalidateFunctionArgs) {
-  if (formMethod && formMethod !== "GET") return false;
+  if (formMethod && formMethod !== "GET") {
+    return String(formData?.get("intent") ?? "").startsWith("tag_");
+  }
   return defaultShouldRevalidate;
 }
 
 export async function action({ request }: Route.ActionArgs) {
   const fd = await request.formData();
-  const drug = String(fd.get("drug_name") ?? "").trim();
-  if (!drug) return { ok: false as const };
-  saveGraphSettings(drug, {
+  const intent = String(fd.get("intent") ?? "");
+
+  if (intent === "tag_create") {
+    const name = String(fd.get("name") ?? "").trim();
+    if (name) createTag(name);
+    return { ok: true as const };
+  }
+  if (intent === "tag_delete") {
+    const name = String(fd.get("name") ?? "").trim();
+    if (name) deleteTag(name);
+    return { ok: true as const };
+  }
+  if (intent === "tag_toggle") {
+    const tag = String(fd.get("tag") ?? "").trim();
+    const drug = String(fd.get("drug") ?? "").trim();
+    if (tag && drug) setTagDrug(tag, drug, String(fd.get("on")) === "1");
+    return { ok: true as const };
+  }
+
+  // default: save per-drug (or per-tag) view settings
+  const key = String(fd.get("drug_name") ?? "").trim();
+  if (!key) return { ok: false as const };
+  saveGraphSettings(key, {
     unit: posNum(String(fd.get("unit") ?? ""), 10),
     tmax_min: posNum(String(fd.get("tmax") ?? ""), 25),
     half_min: posNum(String(fd.get("half") ?? ""), 60),
@@ -44,15 +72,21 @@ export async function action({ request }: Route.ActionArgs) {
 // ごく簡易な血中濃度モデル:
 //   服用量 dosePerUnit を 1 単位とし、服用から tmax 分かけて直線的に +units
 //   （units = 量 / dosePerUnit）まで上昇、その後は半減期 half 分で指数減衰。
-//   複数回の服用は単純に足し合わせる（重ね合わせ）。
+//   複数回の服用は単純に足し合わせる（重ね合わせ）。タグ選択時は、所属薬剤
+//   それぞれを自身の保存済みパラメータで計算し、その合算を表示する。
 // ---------------------------------------------------------------------------
 
-type DosePoint = { t: number; amount: number }; // t = epoch ms
+type DosePoint = { t: number; dose: GraphDose }; // t = epoch ms
+
+/** Per-record peak override (minutes) wins over the default Tmax. */
+function doseTmaxMs(d: DosePoint, defaultTmaxMs: number): number {
+  return d.dose.peak_min != null ? d.dose.peak_min * 60_000 : defaultTmaxMs;
+}
 
 function makeConcFn(
   doses: DosePoint[],
   dosePerUnit: number,
-  tmaxMs: number,
+  defaultTmaxMs: number,
   halfMs: number,
 ): (t: number) => number {
   return (t: number) => {
@@ -60,7 +94,8 @@ function makeConcFn(
     for (const d of doses) {
       const dt = t - d.t;
       if (dt <= 0) continue;
-      const units = d.amount / dosePerUnit;
+      const units = d.dose.amount / dosePerUnit;
+      const tmaxMs = doseTmaxMs(d, defaultTmaxMs);
       if (dt < tmaxMs) c += units * (dt / tmaxMs);
       else c += units * Math.pow(0.5, (dt - tmaxMs) / halfMs);
     }
@@ -104,7 +139,8 @@ function localIsoOf(ms: number): string {
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
 }
 
-// ---- per-drug settings (persisted in the DB via action) --------------------
+// ---- per-key settings (persisted in the DB via action) ----------------------
+// Keys are drug names, or "tag:<名前>" for a tag's view settings (期間など).
 
 type StoredParams = { unit: string; tmax: string; half: string; win: string };
 const DEFAULT_PARAMS: StoredParams = { unit: "10", tmax: "25", half: "60", win: "72" };
@@ -137,21 +173,44 @@ const fieldClass =
   "mt-1 w-full rounded-lg border border-gray-300 px-3 py-2 text-base outline-none focus:border-gray-900";
 
 export default function Graph({ loaderData }: Route.ComponentProps) {
-  const { drugs, doses, settings } = loaderData;
+  const { drugs, doses, settings, tags } = loaderData;
+  const [searchParams, setSearchParams] = useSearchParams();
 
-  const [drugSel, setDrugSel] = useState<string | null>(null);
-  const drug = drugSel ?? drugs[0]?.name ?? "";
-  const [params, setParams] = useState<StoredParams>(() => toStored(settings[drug]));
+  // ---- selection: a drug name, or "tag:<name>" — persisted in the URL ----
+  const drugNames = useMemo(() => drugs.map((d) => d.name), [drugs]);
+  const tagByName = useMemo(() => new Map(tags.map((t) => [t.name, t])), [tags]);
+  const tagParam = searchParams.get("tag");
+  const drugParam = searchParams.get("drug");
+  const sel =
+    tagParam && tagByName.has(tagParam)
+      ? `tag:${tagParam}`
+      : drugParam && drugNames.includes(drugParam)
+        ? drugParam
+        : (drugNames[0] ?? "");
+  const isTag = sel.startsWith("tag:");
+  const tagName = isTag ? sel.slice(4) : null;
+  const members = useMemo(
+    () => (isTag ? (tagByName.get(tagName!)?.drugs ?? []) : sel ? [sel] : []),
+    [isTag, tagName, tagByName, sel],
+  );
+
+  const [params, setParams] = useState<StoredParams>(() => toStored(settings[sel]));
+  const [paramsVersion, setParamsVersion] = useState(0);
   const [nowMs, setNowMs] = useState<number | null>(null);
   const [refMs, setRefMs] = useState<number | null>(null); // 基準時刻（グラフ中央）
   const [follow, setFollow] = useState(true); // 基準時刻を現在時刻に追従させるか
+  const [newTag, setNewTag] = useState("");
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
+  const [activeDose, setActiveDose] = useState<number | null>(null); // record id
 
   const saveFetcher = useFetcher();
+  const tagFetcher = useFetcher<typeof action>();
   // Latest settings edited this session (loader data goes stale after saves).
   const sessionSettings = useRef(new Map<string, StoredParams>());
   const refCache = useRef(new Map<string, { ref: number; follow: boolean }>());
   const saveTimer = useRef<number | null>(null);
-  const pendingSave = useRef<{ drug: string; p: StoredParams } | null>(null);
+  const pendingSave = useRef<{ key: string; p: StoredParams } | null>(null);
+  const pendingNav = useRef<{ tag?: string; clear?: boolean } | null>(null);
   const dragRef = useRef<{ pointerId: number; startX: number; startRef: number } | null>(null);
 
   // Client-only clock (avoids SSR/CSR mismatch); refresh every minute.
@@ -169,13 +228,36 @@ export default function Graph({ loaderData }: Route.ComponentProps) {
     return () => window.clearInterval(t);
   }, []);
 
-  function paramsFor(name: string): StoredParams {
-    return sessionSettings.current.get(name) ?? toStored(settings[name]);
+  function storedFor(key: string): StoredParams {
+    return sessionSettings.current.get(key) ?? toStored(settings[key]);
   }
 
-  function submitSave(name: string, p: StoredParams) {
+  // Reload params + remembered view whenever the selection changes.
+  useEffect(() => {
+    setParams(storedFor(sel));
+    setConfirmingDelete(false);
+    setActiveDose(null);
+    const sess = refCache.current.get(sel);
+    if (sess) {
+      setRefMs(sess.ref);
+      setFollow(sess.follow);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sel]);
+
+  // After a tag create/delete completes, move the selection accordingly.
+  useEffect(() => {
+    if (tagFetcher.state !== "idle" || !pendingNav.current) return;
+    const nav = pendingNav.current;
+    pendingNav.current = null;
+    if (nav.tag) setSearchParams({ tag: nav.tag }, { replace: true, preventScrollReset: true });
+    else if (nav.clear) setSearchParams({}, { replace: true, preventScrollReset: true });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tagFetcher.state]);
+
+  function submitSave(key: string, p: StoredParams) {
     saveFetcher.submit(
-      { drug_name: name, unit: p.unit, tmax: p.tmax, half: p.half, win: p.win },
+      { drug_name: key, unit: p.unit, tmax: p.tmax, half: p.half, win: p.win },
       { method: "post" },
     );
   }
@@ -187,35 +269,34 @@ export default function Graph({ loaderData }: Route.ComponentProps) {
     }
     const pending = pendingSave.current;
     pendingSave.current = null;
-    if (pending) submitSave(pending.drug, pending.p);
+    if (pending) submitSave(pending.key, pending.p);
   }
 
   /** Update one param field; persist to the DB (debounced). */
   function updateParam(patch: Partial<StoredParams>) {
-    if (!drug) return;
+    if (!sel) return;
     const next = { ...params, ...patch };
     setParams(next);
-    sessionSettings.current.set(drug, next);
-    pendingSave.current = { drug, p: next };
+    sessionSettings.current.set(sel, next);
+    setParamsVersion((v) => v + 1);
+    pendingSave.current = { key: sel, p: next };
     if (saveTimer.current != null) window.clearTimeout(saveTimer.current);
     saveTimer.current = window.setTimeout(() => {
       saveTimer.current = null;
       const pending = pendingSave.current;
       pendingSave.current = null;
-      if (pending) submitSave(pending.drug, pending.p);
+      if (pending) submitSave(pending.key, pending.p);
     }, 600);
   }
 
-  /** Switch drug: flush pending save, remember the view, restore the target's. */
-  function switchDrug(name: string) {
+  /** Switch selection: flush pending save, remember the view, update the URL. */
+  function switchSel(value: string) {
     flushSave();
-    if (drug && refMs != null) refCache.current.set(drug, { ref: refMs, follow });
-    setDrugSel(name);
-    setParams(paramsFor(name));
-    const sess = refCache.current.get(name);
-    if (sess) {
-      setRefMs(sess.ref);
-      setFollow(sess.follow);
+    if (sel && refMs != null) refCache.current.set(sel, { ref: refMs, follow });
+    if (value.startsWith("tag:")) {
+      setSearchParams({ tag: value.slice(4) }, { replace: true, preventScrollReset: true });
+    } else {
+      setSearchParams({ drug: value }, { replace: true, preventScrollReset: true });
     }
   }
 
@@ -226,41 +307,91 @@ export default function Graph({ loaderData }: Route.ComponentProps) {
     setFollow(true);
   }
 
-  const dosePerUnit = posNum(params.unit, 10);
-  const tmaxMs = posNum(params.tmax, 25) * 60_000;
-  const halfMs = posNum(params.half, 60) * 60_000;
+  // ---- tag management ----
+  function createNewTag() {
+    const name = newTag.trim();
+    if (!name) return;
+    setNewTag("");
+    pendingNav.current = { tag: name };
+    tagFetcher.submit({ intent: "tag_create", name }, { method: "post" });
+  }
+
+  function removeCurrentTag() {
+    if (!tagName) return;
+    setConfirmingDelete(false);
+    pendingNav.current = { clear: true };
+    tagFetcher.submit({ intent: "tag_delete", name: tagName }, { method: "post" });
+  }
+
+  function toggleMember(drug: string, on: boolean) {
+    if (!tagName) return;
+    tagFetcher.submit(
+      { intent: "tag_toggle", tag: tagName, drug, on: on ? "1" : "0" },
+      { method: "post" },
+    );
+  }
+
   const winH = posNum(params.win, 72);
   const windowMs = winH * HOUR;
 
-  const drugDoses = useMemo<DosePoint[]>(
-    () =>
-      doses
-        .filter((d) => d.drug_name === drug)
-        .map((d) => ({ t: parseLocal(d.taken_at).getTime(), amount: d.amount })),
-    [doses, drug],
-  );
+  const dosesByDrug = useMemo(() => {
+    const m = new Map<string, DosePoint[]>();
+    for (const d of doses) {
+      let arr = m.get(d.drug_name);
+      if (!arr) {
+        arr = [];
+        m.set(d.drug_name, arr);
+      }
+      arr.push({ t: parseLocal(d.taken_at).getTime(), dose: d });
+    }
+    return m;
+  }, [doses]);
 
   const chart = useMemo(() => {
     if (refMs == null) return null;
     const from = refMs - windowMs;
     const to = refMs + windowMs;
-    const conc = makeConcFn(drugDoses, dosePerUnit, tmaxMs, halfMs);
+
+    // One series per member drug, each with its own saved parameters.
+    // (In single-drug mode the on-screen params apply directly.)
+    const series = members.map((name) => {
+      const p = isTag ? storedFor(name) : params;
+      const memberDoses = dosesByDrug.get(name) ?? [];
+      return {
+        name,
+        doses: memberDoses,
+        fn: makeConcFn(
+          memberDoses,
+          posNum(p.unit, 10),
+          posNum(p.tmax, 25) * 60_000,
+          posNum(p.half, 60) * 60_000,
+        ),
+        tmaxMs: posNum(p.tmax, 25) * 60_000,
+      };
+    });
+    const total = (t: number) => {
+      let c = 0;
+      for (const s of series) c += s.fn(t);
+      return c;
+    };
 
     // ~400 regular samples plus exact kink points (dose time / dose peak).
     const step = Math.max(10_000, (to - from) / 400);
     const times: number[] = [];
     for (let t = from; t <= to; t += step) times.push(t);
     times.push(to);
-    for (const d of drugDoses) {
-      if (d.t > from && d.t < to) times.push(d.t);
-      const peak = d.t + tmaxMs;
-      if (peak > from && peak < to) times.push(peak);
+    for (const s of series) {
+      for (const d of s.doses) {
+        if (d.t > from && d.t < to) times.push(d.t);
+        const peak = d.t + doseTmaxMs(d, s.tmaxMs);
+        if (peak > from && peak < to) times.push(peak);
+      }
     }
     times.sort((a, b) => a - b);
 
     let maxC = 0;
-    const pts = times.map((t) => {
-      const c = conc(t);
+    const totalPts = times.map((t) => {
+      const c = total(t);
       if (c > maxC) maxC = c;
       return [t, c] as const;
     });
@@ -269,11 +400,19 @@ export default function Graph({ loaderData }: Route.ComponentProps) {
     const X = (t: number) => ML + ((t - from) / (to - from)) * PW;
     const Y = (c: number) => MT + PH - (c / yMax) * PH;
 
-    let line = "";
-    for (const [t, c] of pts) {
-      line += `${line ? "L" : "M"}${X(t).toFixed(1)} ${Y(c).toFixed(1)}`;
-    }
+    const toPath = (pts: ReadonlyArray<readonly [number, number]>) => {
+      let p = "";
+      for (const [t, c] of pts) p += `${p ? "L" : "M"}${X(t).toFixed(1)} ${Y(c).toFixed(1)}`;
+      return p;
+    };
+
+    const line = toPath(totalPts);
     const area = `${line}L${X(to).toFixed(1)} ${Y(0).toFixed(1)}L${X(from).toFixed(1)} ${Y(0).toFixed(1)}Z`;
+    // Thin individual curves (only meaningful when a tag combines 2+ drugs).
+    const indiv =
+      series.length > 1
+        ? series.map((s) => toPath(times.map((t) => [t, s.fn(t)] as const)))
+        : [];
 
     const stepY = niceStep(yMax);
     const yLines: Array<{ v: number; y: number }> = [];
@@ -298,12 +437,21 @@ export default function Graph({ loaderData }: Route.ComponentProps) {
       });
     }
 
-    const markers = drugDoses
-      .filter((d) => d.t >= from && d.t <= to)
-      .map((d) => ({ x: X(d.t), t: d.t, amount: d.amount }));
+    // Dose markers sit on the combined curve at the moment of intake.
+    const markers = series.flatMap((s) =>
+      s.doses
+        .filter((d) => d.t >= from && d.t <= to)
+        .map((d) => ({
+          key: d.dose.id,
+          x: X(d.t),
+          y: Y(total(d.t)),
+          dose: d.dose,
+        })),
+    );
 
-    return { line, area, yLines, xTicks, markers, from, to, atRef: conc(refMs) };
-  }, [drugDoses, dosePerUnit, tmaxMs, halfMs, refMs, windowMs, winH]);
+    return { line, area, indiv, yLines, xTicks, markers, from, to, atRef: total(refMs) };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [members, isTag, params, paramsVersion, dosesByDrug, refMs, windowMs, winH, settings]);
 
   // Position of the actual "now" line (may differ from center after panning).
   const nowX =
@@ -314,6 +462,7 @@ export default function Graph({ loaderData }: Route.ComponentProps) {
   // ---- drag / swipe to move the reference time ----
   function onPointerDown(e: React.PointerEvent<SVGSVGElement>) {
     if (refMs == null) return;
+    setActiveDose(null);
     e.currentTarget.setPointerCapture(e.pointerId);
     dragRef.current = { pointerId: e.pointerId, startX: e.clientX, startRef: refMs };
   }
@@ -332,8 +481,7 @@ export default function Graph({ loaderData }: Route.ComponentProps) {
     if (dragRef.current?.pointerId === e.pointerId) dragRef.current = null;
   }
 
-  const totalOfDrug = drugs.find((d) => d.name === drug)?.count ?? 0;
-  const excluded = totalOfDrug - drugDoses.length;
+  const doseCount = members.reduce((a, n) => a + (dosesByDrug.get(n)?.length ?? 0), 0);
   const isAtNow = follow || (refMs != null && nowMs != null && Math.abs(refMs - nowMs) < 60_000);
   const centerX = ML + PW / 2;
 
@@ -351,57 +499,68 @@ export default function Graph({ loaderData }: Route.ComponentProps) {
       ) : (
         <>
           <section className="rounded-2xl border border-gray-200 bg-white p-4 shadow-sm">
-            <div className="grid grid-cols-2 gap-3 sm:grid-cols-5">
+            <div className={`grid grid-cols-2 gap-3 ${isTag ? "sm:grid-cols-2" : "sm:grid-cols-5"}`}>
               <label className="col-span-2 block sm:col-span-1">
-                <span className="text-sm font-medium text-gray-700">薬剤</span>
-                <select
-                  value={drug}
-                  onChange={(e) => switchDrug(e.target.value)}
-                  className={fieldClass}
-                >
-                  {drugs.map((d) => (
-                    <option key={d.name} value={d.name}>
-                      {d.name}
-                    </option>
-                  ))}
+                <span className="text-sm font-medium text-gray-700">表示対象</span>
+                <select value={sel} onChange={(e) => switchSel(e.target.value)} className={fieldClass}>
+                  <optgroup label="薬剤">
+                    {drugs.map((d) => (
+                      <option key={d.name} value={d.name}>
+                        {d.name}
+                      </option>
+                    ))}
+                  </optgroup>
+                  {tags.length > 0 && (
+                    <optgroup label="タグ">
+                      {tags.map((t) => (
+                        <option key={t.name} value={`tag:${t.name}`}>
+                          🏷 {t.name}
+                        </option>
+                      ))}
+                    </optgroup>
+                  )}
                 </select>
               </label>
-              <label className="block">
-                <span className="text-sm font-medium text-gray-700">単位服用量</span>
-                <input
-                  type="number"
-                  min="0"
-                  step="any"
-                  inputMode="decimal"
-                  value={params.unit}
-                  onChange={(e) => updateParam({ unit: e.target.value })}
-                  className={fieldClass}
-                />
-              </label>
-              <label className="block">
-                <span className="text-sm font-medium text-gray-700">ピーク(分)</span>
-                <input
-                  type="number"
-                  min="1"
-                  step="1"
-                  inputMode="numeric"
-                  value={params.tmax}
-                  onChange={(e) => updateParam({ tmax: e.target.value })}
-                  className={fieldClass}
-                />
-              </label>
-              <label className="block">
-                <span className="text-sm font-medium text-gray-700">半減期(分)</span>
-                <input
-                  type="number"
-                  min="1"
-                  step="1"
-                  inputMode="numeric"
-                  value={params.half}
-                  onChange={(e) => updateParam({ half: e.target.value })}
-                  className={fieldClass}
-                />
-              </label>
+              {!isTag && (
+                <>
+                  <label className="block">
+                    <span className="text-sm font-medium text-gray-700">単位服用量</span>
+                    <input
+                      type="number"
+                      min="0"
+                      step="any"
+                      inputMode="decimal"
+                      value={params.unit}
+                      onChange={(e) => updateParam({ unit: e.target.value })}
+                      className={fieldClass}
+                    />
+                  </label>
+                  <label className="block">
+                    <span className="text-sm font-medium text-gray-700">ピーク(分)</span>
+                    <input
+                      type="number"
+                      min="1"
+                      step="1"
+                      inputMode="numeric"
+                      value={params.tmax}
+                      onChange={(e) => updateParam({ tmax: e.target.value })}
+                      className={fieldClass}
+                    />
+                  </label>
+                  <label className="block">
+                    <span className="text-sm font-medium text-gray-700">半減期(分)</span>
+                    <input
+                      type="number"
+                      min="1"
+                      step="1"
+                      inputMode="numeric"
+                      value={params.half}
+                      onChange={(e) => updateParam({ half: e.target.value })}
+                      className={fieldClass}
+                    />
+                  </label>
+                </>
+              )}
               <label className="block">
                 <span className="text-sm font-medium text-gray-700">期間(±h)</span>
                 <input
@@ -416,13 +575,88 @@ export default function Graph({ loaderData }: Route.ComponentProps) {
               </label>
             </div>
             <p className="mt-3 text-xs text-gray-400">
-              服用量 {fmtNum(dosePerUnit)} ごとに血中濃度 +1（服用から{" "}
-              {fmtNum(tmaxMs / 60_000)}分でピーク、以降は半減期 {fmtNum(halfMs / 60_000)}
-              分で減衰）。表示範囲 ±{fmtNum(winH)}h。対象レコード {drugDoses.length} 件
-              {excluded > 0 && `（量未入力 ${excluded} 件は除外）`}
-              。設定は薬剤ごとに保存されます。
+              {isTag
+                ? `所属薬剤それぞれの保存済み設定で計算し、合算した血中濃度を表示。`
+                : `服用量 ${fmtNum(posNum(params.unit, 10))} ごとに血中濃度 +1（服用から ${fmtNum(posNum(params.tmax, 25))}分でピーク、以降は半減期 ${fmtNum(posNum(params.half, 60))}分で減衰）。`}
+              表示範囲 ±{fmtNum(winH)}h。対象レコード {doseCount} 件。設定は対象ごとに保存されます。
             </p>
+            <div className="mt-3 flex items-center gap-2">
+              <input
+                value={newTag}
+                onChange={(e) => setNewTag(e.target.value)}
+                placeholder="新しいタグ名"
+                className="w-44 rounded-lg border border-gray-300 px-3 py-1.5 text-sm outline-none focus:border-gray-900"
+              />
+              <button
+                type="button"
+                onClick={createNewTag}
+                disabled={!newTag.trim()}
+                className="rounded-lg border border-gray-300 px-3 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-40"
+              >
+                タグ作成
+              </button>
+            </div>
           </section>
+
+          {isTag && tagName && (
+            <section className="mt-4 rounded-2xl border border-gray-200 bg-white p-4 shadow-sm">
+              <div className="flex items-center justify-between gap-3">
+                <h2 className="text-sm font-medium text-gray-700">
+                  🏷 {tagName} の所属薬剤
+                </h2>
+                {!confirmingDelete ? (
+                  <button
+                    type="button"
+                    onClick={() => setConfirmingDelete(true)}
+                    className="rounded-md px-2 py-1 text-xs font-medium text-gray-500 hover:bg-gray-100"
+                  >
+                    タグを削除
+                  </button>
+                ) : (
+                  <span className="flex gap-1">
+                    <button
+                      type="button"
+                      onClick={removeCurrentTag}
+                      className="rounded-md bg-red-600 px-2 py-1 text-xs font-medium text-white"
+                    >
+                      削除する
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setConfirmingDelete(false)}
+                      className="rounded-md px-2 py-1 text-xs font-medium text-gray-500 hover:bg-gray-100"
+                    >
+                      やめる
+                    </button>
+                  </span>
+                )}
+              </div>
+              <div className="mt-2 flex flex-wrap gap-2">
+                {drugNames.map((name) => {
+                  const on = members.includes(name);
+                  return (
+                    <label
+                      key={name}
+                      className={`inline-flex cursor-pointer items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-sm ${
+                        on ? "border-gray-900 bg-gray-900 text-white" : "border-gray-300 text-gray-700 hover:bg-gray-50"
+                      }`}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={on}
+                        onChange={(e) => toggleMember(name, e.target.checked)}
+                        className="sr-only"
+                      />
+                      {name}
+                    </label>
+                  );
+                })}
+              </div>
+              {members.length === 0 && (
+                <p className="mt-2 text-sm text-gray-400">薬剤を選択してください</p>
+              )}
+            </section>
+          )}
 
           <section className="mt-4 rounded-2xl border border-gray-200 bg-white p-4 shadow-sm">
             {chart == null || refMs == null ? (
@@ -451,6 +685,7 @@ export default function Graph({ loaderData }: Route.ComponentProps) {
                     今に戻す
                   </button>
                 </div>
+                <div className="relative">
                 <svg
                   viewBox={`0 0 ${W} ${H}`}
                   className="w-full cursor-grab select-none active:cursor-grabbing"
@@ -521,7 +756,12 @@ export default function Graph({ loaderData }: Route.ComponentProps) {
                   {/* baseline */}
                   <line x1={ML} y1={MT + PH} x2={W - MR} y2={MT + PH} stroke="#d1d5db" strokeWidth="1" />
 
-                  {/* concentration curve */}
+                  {/* individual member curves (tag mode) */}
+                  {chart.indiv.map((p, i) => (
+                    <path key={i} d={p} fill="none" stroke="#9ca3af" strokeWidth="1" opacity="0.8" />
+                  ))}
+
+                  {/* combined concentration curve */}
                   <path d={chart.area} fill="rgba(17,24,39,0.06)" stroke="none" />
                   <path d={chart.line} fill="none" stroke="#111827" strokeWidth="1.5" />
 
@@ -543,27 +783,85 @@ export default function Graph({ loaderData }: Route.ComponentProps) {
                     </g>
                   )}
 
-                  {/* dose markers */}
-                  {chart.markers.map((m, i) => (
-                    <circle
-                      key={i}
-                      cx={m.x}
-                      cy={MT + PH}
-                      r="3.5"
-                      fill="#d97706"
-                      stroke="#fff"
-                      strokeWidth="1"
-                    >
-                      <title>{`${formatTaken(localIsoOf(m.t))}  量 ${fmtNum(m.amount)}`}</title>
-                    </circle>
-                  ))}
+                  {/* dose markers (on the curve; click / focus for details) */}
+                  {chart.markers.map((m) => {
+                    const active = activeDose === m.key;
+                    return (
+                      <circle
+                        key={m.key}
+                        cx={m.x}
+                        cy={m.y}
+                        r={active ? 6 : 4.5}
+                        fill={active ? "#b45309" : "#d97706"}
+                        stroke="#fff"
+                        strokeWidth="1.5"
+                        tabIndex={0}
+                        className="cursor-pointer outline-none"
+                        onPointerDown={(e) => e.stopPropagation()}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setActiveDose((cur) => (cur === m.key ? null : m.key));
+                        }}
+                        onFocus={() => setActiveDose(m.key)}
+                        onBlur={() =>
+                          setActiveDose((cur) => (cur === m.key ? null : cur))
+                        }
+                      />
+                    );
+                  })}
                 </svg>
+
+                {/* dose detail popover */}
+                {(() => {
+                  const m = chart.markers.find((mk) => mk.key === activeDose);
+                  if (!m) return null;
+                  const xPct = (m.x / W) * 100;
+                  const yPct = (m.y / H) * 100;
+                  const below = yPct < 30;
+                  return (
+                    <div
+                      className="pointer-events-none absolute z-10 rounded-lg bg-gray-900 px-3 py-2 text-xs text-white shadow-lg"
+                      style={{
+                        left: `${xPct}%`,
+                        top: `${yPct}%`,
+                        transform: `translate(${xPct > 82 ? "-90%" : xPct < 18 ? "-10%" : "-50%"}, ${below ? "14px" : "calc(-100% - 14px)"})`,
+                        maxWidth: "70%",
+                      }}
+                    >
+                      <div className="font-semibold">
+                        {m.dose.drug_name}
+                        {m.dose.product_name && (
+                          <span className="ml-1.5 font-normal text-gray-300">
+                            {m.dose.product_name}
+                          </span>
+                        )}
+                      </div>
+                      <div className="mt-0.5 text-gray-300 tabular-nums">
+                        {formatTaken(m.dose.taken_at)}
+                        {m.dose.taken_error_min != null && ` ±${m.dose.taken_error_min}m`}
+                        <span className="ml-1.5 text-white">
+                          量 {fmtNum(m.dose.amount)}
+                          {m.dose.unit ?? ""}
+                        </span>
+                        {m.dose.peak_min != null && (
+                          <span className="ml-1.5">ピーク{fmtNum(m.dose.peak_min)}分</span>
+                        )}
+                      </div>
+                      {m.dose.note && (
+                        <div className="mt-0.5 break-words text-gray-300">{m.dose.note}</div>
+                      )}
+                    </div>
+                  );
+                })()}
+                </div>
                 <p className="mt-1 text-center text-xs text-gray-400">
-                  グラフを左右にドラッグ / スワイプで基準時刻を移動
+                  グラフを左右にドラッグ / スワイプで基準時刻を移動。服用の点をタップで詳細
                 </p>
-                {drugDoses.length === 0 && (
+                {doseCount === 0 && (
                   <p className="mt-2 text-center text-sm text-gray-400">
-                    この薬剤には量が入力された記録がありません
+                    {isTag
+                      ? "タグに量が入力された記録のある薬剤がありません"
+                      : "この薬剤には量が入力された記録がありません"}
                   </p>
                 )}
               </>

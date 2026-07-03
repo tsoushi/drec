@@ -26,11 +26,11 @@ npm run start      # 本番サーバ → http://localhost:3000
 
 ## アーキテクチャ
 
-メイン画面は `app/routes/home.tsx`（loader / action / UI がすべて入っている）。補助画面は読み取り専用で `/logs`（変更ログ閲覧）、`/report`（月別の薬剤別 回数・合計量レポート。`report.server.ts`）、`/graph`（血中濃度の簡易グラフ。専用の `graph.server.ts` を持ち、モデル計算・SVG 描画・ドラッグ操作はクライアント側。パラメータは薬剤ごとに `graph_settings` テーブルへ action 経由でデバウンス保存 — 表示設定なので例外的に `logChange` を通さない。`shouldRevalidate` で保存時の再検証を抑止）。
+メイン画面は `app/routes/home.tsx`（loader / action / UI がすべて入っている）。補助画面は読み取り専用で `/logs`（変更ログ閲覧）、`/report`（月別の薬剤別 回数・合計量レポート。`report.server.ts`）、`/graph`（血中濃度の簡易グラフ。専用の `graph.server.ts` を持ち、モデル計算・SVG 描画・ドラッグ操作はクライアント側。パラメータは対象ごとに `graph_settings` テーブルへ action 経由でデバウンス保存（キーは薬剤名または `tag:<名前>`）— 表示設定なので例外的に `logChange` を通さない。薬剤グループは `graph_tags`/`graph_tag_drugs`（タグ選択で各薬剤の保存済み設定による曲線を合算表示）。`shouldRevalidate` は設定保存のみ再検証を抑止し、`tag_*` intent は再検証する。表示対象は `?drug=`/`?tag=` クエリパラメータに保持）。
 
 - **action は formData の `intent` で分岐**: `create` / `update` / `delete`（記録）、`comment_create` / `comment_update` / `comment_delete`（コメント）。成功で `{ ok: true }` → useFetcher の revalidation で一覧更新。
 - **DB 層** (`app/db/`): `*.server.ts` 命名必須（better-sqlite3 をクライアントバンドルに混入させない。`vite.config.ts` の `ssr.external` にも指定済み）。
-  - `db.server.ts` — 接続シングルトン（HMR 対策で `globalThis.__drecDb` にキャッシュ）＋ **`PRAGMA user_version` ベースのマイグレーション**。スキーマ変更は `MIGRATIONS` 配列に関数を 1 つ追記するだけ（現在 v4）。
+  - `db.server.ts` — 接続シングルトン（HMR 対策で `globalThis.__drecDb` にキャッシュ）＋ **`PRAGMA user_version` ベースのマイグレーション**。スキーマ変更は `MIGRATIONS` 配列に関数を 1 つ追記するだけ（現在 v7）。
   - `records.server.ts` / `comments.server.ts` — prepared statement による型付き CRUD。コメントは `comment_mentions`（多対多）で 0..N 件の記録を参照。
   - `log.server.ts` — **記録・コメントの DB 変更（create/update/delete）は `logChange` を必ず通す**。コンソール＋ `changes.log` に追記され、`/logs`（`app/routes/logs.tsx`）で閲覧できる。新しい書き込み経路を作るときも必須（例外: `graph_settings` などの表示設定はログ対象外）。
 - **タイムライン**: 記録（`taken_at`）とコメント（`commented_at`）をクライアントでマージして新しい順に表示。
