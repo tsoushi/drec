@@ -176,6 +176,7 @@ export default function Home({ loaderData }: Route.ComponentProps) {
 
   const [mode, setMode] = useState<Mode>("record");
   const [editing, setEditing] = useState<Rec | null>(null);
+  const [copying, setCopying] = useState<Rec | null>(null); // もう一度: コピー元
   const [editingComment, setEditingComment] = useState<Comment | null>(null);
   const [takenAt, setTakenAt] = useState("");
   const [manualTime, setManualTime] = useState(false);
@@ -241,6 +242,7 @@ export default function Home({ loaderData }: Route.ComponentProps) {
 
   function resetForm() {
     setEditing(null);
+    setCopying(null);
     setEditingComment(null);
     setCommentMentions([]);
     setTakenError("");
@@ -270,9 +272,24 @@ export default function Home({ loaderData }: Route.ComponentProps) {
     resetForm();
   }
 
+  /** もう一度: open a fresh create form pre-filled from the given record. */
+  function startCopy(r: Rec) {
+    setMode("record");
+    setEditing(null);
+    setCopying(r);
+    setEditingComment(null);
+    setCommentMentions([]);
+    setTakenAt(nowLocalInputValue());
+    setManualText(nowLocalSlash());
+    setTakenError("");
+    setFormKey((k) => k + 1);
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  }
+
   function startEdit(r: Rec) {
     setMode("record");
     setEditing(r);
+    setCopying(null);
     setEditingComment(null);
     setCommentMentions([]);
     setTakenAt(r.taken_at.slice(0, 16));
@@ -303,6 +320,7 @@ export default function Home({ loaderData }: Route.ComponentProps) {
     } else {
       setMode("comment");
       setEditing(null);
+      setCopying(null);
       setEditingComment(null);
       setCommentMentions([r.id]);
       setTakenError("");
@@ -333,6 +351,8 @@ export default function Home({ loaderData }: Route.ComponentProps) {
   const submitting = fetcher.state !== "idle";
   const errorMsg = fetcher.data && !fetcher.data.ok ? fetcher.data.error : null;
   const isEditing = editing !== null || editingComment !== null;
+  // Field defaults come from the record being edited, or the copy source (もう一度).
+  const seed = editing ?? copying;
   const intentValue =
     mode === "record"
       ? editing
@@ -412,7 +432,7 @@ export default function Home({ loaderData }: Route.ComponentProps) {
               <input
                 ref={drugRef}
                 name="drug_name"
-                defaultValue={editing?.drug_name ?? ""}
+                defaultValue={seed?.drug_name ?? ""}
                 list="drugs"
                 required
                 autoComplete="off"
@@ -425,7 +445,7 @@ export default function Home({ loaderData }: Route.ComponentProps) {
               <span className="text-sm font-medium text-gray-700">製品名</span>
               <input
                 name="product_name"
-                defaultValue={editing?.product_name ?? ""}
+                defaultValue={seed?.product_name ?? ""}
                 list="products"
                 autoComplete="off"
                 placeholder="例: ロキソニン"
@@ -441,7 +461,7 @@ export default function Home({ loaderData }: Route.ComponentProps) {
                   type="number"
                   step="0.01"
                   inputMode="decimal"
-                  defaultValue={editing?.amount ?? ""}
+                  defaultValue={seed?.amount ?? ""}
                   placeholder="例: 60"
                   className={inputClass}
                 />
@@ -450,7 +470,7 @@ export default function Home({ loaderData }: Route.ComponentProps) {
                 <span className="text-sm font-medium text-gray-700">単位</span>
                 <input
                   name="unit"
-                  defaultValue={editing?.unit ?? ""}
+                  defaultValue={seed?.unit ?? ""}
                   list="units"
                   autoComplete="off"
                   placeholder="例: mg"
@@ -480,7 +500,7 @@ export default function Home({ loaderData }: Route.ComponentProps) {
                 min="1"
                 step="1"
                 inputMode="numeric"
-                defaultValue={editing?.peak_min ?? ""}
+                defaultValue={seed?.peak_min ?? ""}
                 placeholder="任意（グラフでの最大到達時間。未入力は既定値）"
                 className={inputClass}
               />
@@ -576,7 +596,7 @@ export default function Home({ loaderData }: Route.ComponentProps) {
           >
             {submitLabel}
           </button>
-          {isEditing && (
+          {(isEditing || copying) && (
             <button
               type="button"
               onClick={resetForm}
@@ -626,6 +646,7 @@ export default function Home({ loaderData }: Route.ComponentProps) {
                       highlighted={highlightId === item.rec.id}
                       nowMs={nowMs}
                       onEdit={startEdit}
+                      onCopy={startCopy}
                       onComment={commentOnRecord}
                     />
                   ) : (
@@ -762,6 +783,7 @@ function RecordRow({
   highlighted,
   nowMs,
   onEdit,
+  onCopy,
   onComment,
 }: {
   r: Rec;
@@ -769,29 +791,13 @@ function RecordRow({
   highlighted: boolean;
   nowMs: number | null;
   onEdit: (r: Rec) => void;
+  onCopy: (r: Rec) => void;
   onComment: (r: Rec) => void;
 }) {
   const del = useFetcher();
-  const again = useFetcher();
   const [confirming, setConfirming] = useState(false);
-  const busy = del.state !== "idle" || again.state !== "idle";
+  const busy = del.state !== "idle";
   const ago = nowMs != null ? agoLabel(r.taken_at, nowMs) : null;
-
-  function recordAgain() {
-    again.submit(
-      {
-        intent: "create",
-        drug_name: r.drug_name,
-        product_name: r.product_name ?? "",
-        amount: r.amount != null ? String(r.amount) : "",
-        unit: r.unit ?? "",
-        taken_at: nowLocalInputValue(),
-        peak_min: r.peak_min != null ? String(r.peak_min) : "",
-        note: "",
-      },
-      { method: "post" },
-    );
-  }
 
   function remove() {
     setConfirming(false);
@@ -838,8 +844,7 @@ function RecordRow({
           <div className="flex gap-1">
             <button
               type="button"
-              onClick={recordAgain}
-              disabled={busy}
+              onClick={() => onCopy(r)}
               className="rounded-md px-2 py-1 text-xs font-medium text-gray-700 hover:bg-gray-100"
             >
               もう一度
