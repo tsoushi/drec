@@ -587,34 +587,45 @@ export default function Graph({ loaderData }: Route.ComponentProps) {
                     </g>
                   )}
 
-                  {/* markers: dose (amber) / comment (blue); click or focus for details */}
+                  {/* markers: dose (amber) / comment (blue); tap / focus for details.
+                      A large transparent hit circle makes them easy to tap on
+                      touch screens even though the visible dot is small. */}
                   {chart.markers.map((m) => {
                     const active = activeMarker === m.key;
+                    const color =
+                      m.kind === "dose"
+                        ? active ? "#b45309" : "#d97706"
+                        : active ? "#1d4ed8" : "#2563eb";
                     return (
-                      <circle
-                        key={m.key}
-                        cx={m.x}
-                        cy={m.y}
-                        r={active ? 6 : 4.5}
-                        fill={
-                          m.kind === "dose"
-                            ? active ? "#b45309" : "#d97706"
-                            : active ? "#1d4ed8" : "#2563eb"
-                        }
-                        stroke="#fff"
-                        strokeWidth="1.5"
-                        tabIndex={0}
-                        className="cursor-pointer outline-none"
-                        onPointerDown={(e) => e.stopPropagation()}
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          setActiveMarker((cur) => (cur === m.key ? null : m.key));
-                        }}
-                        onFocus={() => setActiveMarker(m.key)}
-                        onBlur={() =>
-                          setActiveMarker((cur) => (cur === m.key ? null : cur))
-                        }
-                      />
+                      <g key={m.key}>
+                        <circle
+                          cx={m.x}
+                          cy={m.y}
+                          r={20}
+                          fill="none"
+                          pointerEvents="all"
+                          tabIndex={0}
+                          className="cursor-pointer outline-none"
+                          onPointerDown={(e) => e.stopPropagation()}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setActiveMarker((cur) => (cur === m.key ? null : m.key));
+                          }}
+                          onFocus={() => setActiveMarker(m.key)}
+                          onBlur={() =>
+                            setActiveMarker((cur) => (cur === m.key ? null : cur))
+                          }
+                        />
+                        <circle
+                          cx={m.x}
+                          cy={m.y}
+                          r={active ? 8 : 6}
+                          fill={color}
+                          stroke="#fff"
+                          strokeWidth="1.5"
+                          pointerEvents="none"
+                        />
+                      </g>
                     );
                   })}
                 </svg>
