@@ -93,6 +93,15 @@ const MIGRATIONS: Array<(db: Database.Database) => void> = [
   (db) => {
     db.exec(`ALTER TABLE records ADD COLUMN peak_min REAL;`);
   },
+  // v8 — the graph "tag" (drug group) feature was a misunderstanding; drop it.
+  // Graph annotations now come from existing comments instead.
+  (db) => {
+    db.exec(`
+      DROP TABLE IF EXISTS graph_tag_drugs;
+      DROP TABLE IF EXISTS graph_tags;
+      DELETE FROM graph_settings WHERE drug_name LIKE 'tag:%';
+    `);
+  },
 ];
 
 function migrate(db: Database.Database): void {
