@@ -224,7 +224,10 @@ export default function Home({ loaderData }: Route.ComponentProps) {
   }, []);
 
   // Focus the first field whenever the form (re)mounts.
+  // タッチ端末ではフォーカスでソフトキーボードと datalist 候補が開いて
+  // 画面を覆ってしまう（特に保存直後）ので、自動フォーカスしない。
   useEffect(() => {
+    if (window.matchMedia("(pointer: coarse)").matches) return;
     if (mode === "record") drugRef.current?.focus();
     else bodyRef.current?.focus();
   }, [formKey]);
