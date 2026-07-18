@@ -335,6 +335,25 @@ export default function Graph({ loaderData }: Route.ComponentProps) {
     return () => el.removeEventListener("wheel", onWheel);
   }, [hasChart]);
 
+  // Mobile pinch: with touch-action pan-y the browser may claim a two-finger
+  // gesture as a vertical scroll and cancel our pointers mid-pinch. Suppress
+  // the default only while 2+ fingers touch the chart — one-finger vertical
+  // page scroll keeps working. (React registers touch handlers passively, so
+  // these must be native non-passive listeners.)
+  useEffect(() => {
+    const el = svgRef.current;
+    if (!el) return;
+    const onTouch = (e: TouchEvent) => {
+      if (e.touches.length >= 2) e.preventDefault();
+    };
+    el.addEventListener("touchstart", onTouch, { passive: false });
+    el.addEventListener("touchmove", onTouch, { passive: false });
+    return () => {
+      el.removeEventListener("touchstart", onTouch);
+      el.removeEventListener("touchmove", onTouch);
+    };
+  }, [hasChart]);
+
   const dosesByDrug = useMemo(() => {
     const m = new Map<string, DosePoint[]>();
     for (const d of doses) {
