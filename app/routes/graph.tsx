@@ -201,6 +201,11 @@ export default function Graph({ loaderData }: Route.ComponentProps) {
   const saveTimer = useRef<number | null>(null);
   const pendingSave = useRef<{ key: string; p: StoredParams } | null>(null);
   const dragRef = useRef<{ pointerId: number; startX: number; startRef: number } | null>(null);
+  // Active pointers on the SVG; two at once = pinch (zooms the ± window).
+  const pointersRef = useRef(new Map<number, { x: number; y: number }>());
+  const pinchRef = useRef<{ startDist: number; startWin: number } | null>(null);
+  const svgRef = useRef<SVGSVGElement>(null);
+  const wheelZoomRef = useRef<(factor: number) => void>(() => {});
 
   // Client-only clock (avoids SSR/CSR mismatch); refresh every minute.
   useEffect(() => {
@@ -293,6 +298,42 @@ export default function Graph({ loaderData }: Route.ComponentProps) {
 
   const winH = posNum(params.win, 72);
   const windowMs = winH * HOUR;
+
+  // ---- wheel / pinch zoom of the ± window (persists via updateParam) ----
+  const WIN_MIN = 1;
+  const WIN_MAX = 24 * 30;
+
+  /** Set 期間(±h) to nextWin (clamped & rounded), through the debounced save. */
+  function zoomWindow(nextWin: number) {
+    const clamped = Math.min(WIN_MAX, Math.max(WIN_MIN, nextWin));
+    const rounded =
+      clamped >= 24 ? Math.round(clamped) : parseFloat(clamped.toFixed(1));
+    const next = String(rounded);
+    if (next !== params.win) updateParam({ win: next });
+  }
+
+  // The native wheel listener (below) calls through this ref so it always sees
+  // the current winH/params without re-registering on every render.
+  useEffect(() => {
+    wheelZoomRef.current = (factor: number) => zoomWindow(winH * factor);
+  });
+
+  // Wheel zoom needs preventDefault (stop page scroll), but React attaches
+  // wheel listeners passively — register a native non-passive one instead.
+  const hasChart = refMs != null && selected.length > 0;
+  useEffect(() => {
+    const el = svgRef.current;
+    if (!el) return;
+    const onWheel = (e: WheelEvent) => {
+      e.preventDefault();
+      const px = e.deltaMode === 1 ? e.deltaY * 33 : e.deltaY; // lines -> px
+      // One notch (~100px) ≈ ×1.17 — from the default ±72h that's ~±10h.
+      const norm = Math.max(-300, Math.min(300, px));
+      wheelZoomRef.current(Math.pow(2, norm / 450));
+    };
+    el.addEventListener("wheel", onWheel, { passive: false });
+    return () => el.removeEventListener("wheel", onWheel);
+  }, [hasChart]);
 
   const dosesByDrug = useMemo(() => {
     const m = new Map<string, DosePoint[]>();
@@ -427,14 +468,43 @@ export default function Graph({ loaderData }: Route.ComponentProps) {
       ? ML + ((nowMs - chart.from) / (chart.to - chart.from)) * PW
       : null;
 
-  // ---- drag / swipe to move the reference time ----
+  // ---- drag / swipe to move the reference time; two pointers = pinch zoom ----
+  function pinchDist(): number | null {
+    const pts = Array.from(pointersRef.current.values());
+    if (pts.length < 2) return null;
+    const d = Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y);
+    return d > 0 ? d : null;
+  }
+
   function onPointerDown(e: React.PointerEvent<SVGSVGElement>) {
     if (refMs == null) return;
     setActiveMarker(null);
-    e.currentTarget.setPointerCapture(e.pointerId);
-    dragRef.current = { pointerId: e.pointerId, startX: e.clientX, startRef: refMs };
+    try {
+      e.currentTarget.setPointerCapture(e.pointerId);
+    } catch {
+      // pointer may already be gone (or synthetic) — tracking still works
+    }
+    pointersRef.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (pointersRef.current.size >= 2) {
+      // Second finger down: stop panning, start pinching from here.
+      dragRef.current = null;
+      const dist = pinchDist();
+      if (dist != null) pinchRef.current = { startDist: dist, startWin: winH };
+    } else {
+      dragRef.current = { pointerId: e.pointerId, startX: e.clientX, startRef: refMs };
+    }
   }
   function onPointerMove(e: React.PointerEvent<SVGSVGElement>) {
+    if (pointersRef.current.has(e.pointerId)) {
+      pointersRef.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    }
+    const pinch = pinchRef.current;
+    if (pinch) {
+      // Spread (pinch out) = magnify = narrower ± window.
+      const dist = pinchDist();
+      if (dist != null) zoomWindow(pinch.startWin * (pinch.startDist / dist));
+      return;
+    }
     const d = dragRef.current;
     if (!d || e.pointerId !== d.pointerId) return;
     const rect = e.currentTarget.getBoundingClientRect();
@@ -446,6 +516,8 @@ export default function Graph({ loaderData }: Route.ComponentProps) {
     }
   }
   function onPointerUp(e: React.PointerEvent<SVGSVGElement>) {
+    pointersRef.current.delete(e.pointerId);
+    if (pointersRef.current.size < 2) pinchRef.current = null;
     if (dragRef.current?.pointerId === e.pointerId) dragRef.current = null;
   }
 
@@ -605,6 +677,7 @@ export default function Graph({ loaderData }: Route.ComponentProps) {
                 </div>
                 <div className="relative">
                 <svg
+                  ref={svgRef}
                   viewBox={`0 0 ${W} ${H}`}
                   className="w-full cursor-grab select-none active:cursor-grabbing"
                   style={{ touchAction: "pan-y" }}
@@ -614,6 +687,16 @@ export default function Graph({ loaderData }: Route.ComponentProps) {
                   onPointerUp={onPointerUp}
                   onPointerCancel={onPointerUp}
                 >
+                  {/* current ± window (zoom feedback for wheel / pinch) */}
+                  <text
+                    x={W - MR - 4}
+                    y={MT + 9}
+                    textAnchor="end"
+                    fontSize="10"
+                    fill="#9ca3af"
+                  >
+                    ±{fmtNum(winH)}h
+                  </text>
                   {/* horizontal gridlines + labels */}
                   {chart.yLines.map(({ v, y }) => (
                     <g key={v}>
@@ -799,7 +882,7 @@ export default function Graph({ loaderData }: Route.ComponentProps) {
                 })()}
                 </div>
                 <p className="mt-1 text-center text-xs text-gray-400">
-                  グラフを左右にドラッグ / スワイプで基準時刻を移動。点（服用 / 💬コメント）をタップで詳細
+                  左右ドラッグ / スワイプで基準時刻を移動、ホイール / ピンチで期間(±h)を拡大縮小。点（服用 / 💬コメント）をタップで詳細
                 </p>
               </>
             )}
