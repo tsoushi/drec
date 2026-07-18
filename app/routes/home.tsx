@@ -378,32 +378,28 @@ export default function Home({ loaderData }: Route.ComponentProps) {
     <main className="mx-auto max-w-xl px-4 pb-24">
       <header className="flex items-baseline justify-between py-4">
         <h1 className="text-2xl font-bold tracking-tight">drec</h1>
-        <div className="flex items-baseline gap-3">
+        <div className="flex max-w-[70%] flex-wrap items-baseline justify-end gap-x-3 gap-y-0.5">
           <span className="text-sm text-gray-500">服薬記録</span>
-          <Link
-            to="/notes"
-            className="text-xs text-gray-300 hover:text-gray-600"
-          >
-            ノート
-          </Link>
-          <Link
-            to="/graph"
-            className="text-xs text-gray-300 hover:text-gray-600"
-          >
-            グラフ
-          </Link>
-          <Link
-            to="/report"
-            className="text-xs text-gray-300 hover:text-gray-600"
-          >
-            レポート
-          </Link>
-          <Link
-            to="/logs"
-            className="text-xs text-gray-300 hover:text-gray-600"
-          >
-            ログ
-          </Link>
+          {(
+            [
+              ["/notes", "ノート"],
+              ["/calendar", "カレンダー"],
+              ["/graph", "グラフ"],
+              ["/stats", "統計"],
+              ["/report", "レポート"],
+              ["/search", "検索"],
+              ["/logs", "ログ"],
+              ["/export", "エクスポート"],
+            ] as const
+          ).map(([to, label]) => (
+            <Link
+              key={to}
+              to={to}
+              className="text-xs text-gray-300 hover:text-gray-600"
+            >
+              {label}
+            </Link>
+          ))}
         </div>
       </header>
 

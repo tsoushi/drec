@@ -5,6 +5,7 @@ import type { Route } from "./+types/notes";
 import { getNotesPage } from "../db/notes.server";
 import type { Rec } from "../db/records.server";
 import type { Comment } from "../db/comments.server";
+import { drugColor } from "../lib/colors";
 import {
   dateKey,
   formatDateHeader,
@@ -32,26 +33,6 @@ export async function loader({ request }: Route.LoaderArgs) {
 // going through the single logChange-audited path. This route has no action.
 
 type ActionResult = { ok: true } | { ok: false; error: string };
-
-// Stable per-drug accent colors so the record<->comment linkage is scannable.
-const DRUG_COLORS = [
-  "#2563eb", // blue-600
-  "#dc2626", // red-600
-  "#059669", // emerald-600
-  "#d97706", // amber-600
-  "#7c3aed", // violet-600
-  "#db2777", // pink-600
-  "#0891b2", // cyan-600
-  "#65a30d", // lime-600
-  "#0d9488", // teal-600
-  "#ea580c", // orange-600
-];
-
-function drugColor(name: string): string {
-  let h = 0;
-  for (const ch of name) h = (h * 31 + (ch.codePointAt(0) ?? 0)) >>> 0;
-  return DRUG_COLORS[h % DRUG_COLORS.length];
-}
 
 function timeOfDay(iso: string): string {
   return iso.slice(11, 16);
