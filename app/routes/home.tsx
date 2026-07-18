@@ -30,6 +30,13 @@ import {
   nowLocalInputValue,
   nowLocalSlash,
 } from "../lib/time";
+import {
+  DEFAULT_MENU,
+  loadMenuOrder,
+  resetMenuOrder,
+  saveMenuOrder,
+  type MenuItem,
+} from "../lib/menu";
 
 const COMMON_UNITS = ["mg", "g", "錠", "mL", "包", "滴", "単位", "回"];
 
@@ -186,6 +193,8 @@ export default function Home({ loaderData }: Route.ComponentProps) {
   const [highlightId, setHighlightId] = useState<number | null>(null);
   const [formKey, setFormKey] = useState(0);
   const [nowMs, setNowMs] = useState<number | null>(null);
+  const [menu, setMenu] = useState<MenuItem[]>(DEFAULT_MENU);
+  const [menuEditing, setMenuEditing] = useState(false);
 
   const drugRef = useRef<HTMLInputElement>(null);
   const bodyRef = useRef<HTMLTextAreaElement>(null);
@@ -215,6 +224,28 @@ export default function Home({ loaderData }: Route.ComponentProps) {
     setTakenAt(nowLocalInputValue());
     setManualText(nowLocalSlash());
   }, []);
+
+  // Apply the saved menu order on the client (localStorage is unavailable on
+  // the server, so SSR always shows the default order).
+  useEffect(() => {
+    setMenu(loadMenuOrder());
+  }, []);
+
+  function moveMenuItem(index: number, delta: -1 | 1) {
+    setMenu((cur) => {
+      const to = index + delta;
+      if (to < 0 || to >= cur.length) return cur;
+      const next = [...cur];
+      [next[index], next[to]] = [next[to], next[index]];
+      saveMenuOrder(next);
+      return next;
+    });
+  }
+
+  function resetMenu() {
+    resetMenuOrder();
+    setMenu(DEFAULT_MENU);
+  }
 
   // Tick the clock every second so the relative-time labels update in real time.
   useEffect(() => {
@@ -380,28 +411,88 @@ export default function Home({ loaderData }: Route.ComponentProps) {
         <h1 className="text-2xl font-bold tracking-tight">drec</h1>
         <div className="flex max-w-[70%] flex-wrap items-baseline justify-end gap-x-3 gap-y-0.5">
           <span className="text-sm text-gray-500">服薬記録</span>
-          {(
-            [
-              ["/notes", "ノート"],
-              ["/calendar", "カレンダー"],
-              ["/graph", "グラフ"],
-              ["/stats", "統計"],
-              ["/report", "レポート"],
-              ["/search", "検索"],
-              ["/logs", "ログ"],
-              ["/export", "エクスポート"],
-            ] as const
-          ).map(([to, label]) => (
+          {menu.map((item) => (
             <Link
-              key={to}
-              to={to}
+              key={item.to}
+              to={item.to}
               className="text-xs text-gray-300 hover:text-gray-600"
             >
-              {label}
+              {item.label}
             </Link>
           ))}
+          <button
+            type="button"
+            onClick={() => setMenuEditing((v) => !v)}
+            aria-label="メニューの並び替え"
+            title="メニューの並び替え"
+            className={`text-xs ${menuEditing ? "text-gray-700" : "text-gray-300"} hover:text-gray-600`}
+          >
+            ⚙
+          </button>
         </div>
       </header>
+
+      {menuEditing && (
+        <section className="mb-4 rounded-2xl border border-gray-200 bg-white p-4 shadow-sm">
+          <div className="flex items-baseline justify-between">
+            <h2 className="text-sm font-semibold text-gray-700">
+              メニューの並び替え
+            </h2>
+            <div className="flex gap-2">
+              <button
+                type="button"
+                onClick={resetMenu}
+                className="rounded-md px-2 py-1 text-xs font-medium text-gray-500 hover:bg-gray-100"
+              >
+                リセット
+              </button>
+              <button
+                type="button"
+                onClick={() => setMenuEditing(false)}
+                className="rounded-md border border-gray-300 px-2 py-1 text-xs font-medium text-gray-700 hover:bg-gray-50"
+              >
+                閉じる
+              </button>
+            </div>
+          </div>
+          <ul className="mt-2 divide-y divide-gray-100">
+            {menu.map((item, i) => (
+              <li
+                key={item.to}
+                className="flex items-center justify-between gap-2 py-1.5"
+              >
+                <span className="text-sm text-gray-800">
+                  {item.label}
+                  <span className="ml-2 text-xs text-gray-300">{item.to}</span>
+                </span>
+                <span className="flex gap-1">
+                  <button
+                    type="button"
+                    onClick={() => moveMenuItem(i, -1)}
+                    disabled={i === 0}
+                    aria-label={`${item.label}を上へ`}
+                    className="rounded-md border border-gray-300 px-2.5 py-1 text-sm text-gray-700 hover:bg-gray-50 disabled:opacity-30"
+                  >
+                    ↑
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => moveMenuItem(i, 1)}
+                    disabled={i === menu.length - 1}
+                    aria-label={`${item.label}を下へ`}
+                    className="rounded-md border border-gray-300 px-2.5 py-1 text-sm text-gray-700 hover:bg-gray-50 disabled:opacity-30"
+                  >
+                    ↓
+                  </button>
+                </span>
+              </li>
+            ))}
+          </ul>
+          <p className="mt-2 text-xs text-gray-400">
+            並び順はこの端末（ブラウザ）に保存されます。
+          </p>
+        </section>
+      )}
 
       <fetcher.Form
         key={formKey}
