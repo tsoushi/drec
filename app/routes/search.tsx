@@ -8,6 +8,12 @@ import type { Comment } from "../db/comments.server";
 import { drugColor } from "../lib/colors";
 import { dateKey, formatDateHeader, formatTaken } from "../lib/time";
 
+/** One-line preview of a comment body for compact mention chips. */
+function excerpt(s: string, n = 14): string {
+  const t = s.replace(/\s+/g, " ").trim();
+  return t.length > n ? `${t.slice(0, n)}…` : t;
+}
+
 export function meta(_: Route.MetaArgs) {
   return [{ title: "drec — 検索" }];
 }
@@ -62,6 +68,12 @@ export default function Search({ loaderData }: Route.ComponentProps) {
     for (const r of mentionedRecords) m.set(r.id, r);
     return m;
   }, [records, mentionedRecords]);
+
+  const commentsById = useMemo(() => {
+    const m = new Map<number, Comment>();
+    for (const c of comments) m.set(c.id, c);
+    return m;
+  }, [comments]);
 
   // Merge into one newest-first timeline with day headers (like home).
   const results = useMemo(() => {
@@ -181,14 +193,25 @@ export default function Search({ loaderData }: Route.ComponentProps) {
                       </div>
                       {item.comment.mentions.length > 0 && (
                         <div className="mt-1.5 flex flex-wrap gap-1">
-                          {item.comment.mentions.map((rid) => {
-                            const rec = recordsById.get(rid);
+                          {item.comment.mentions.map((ref) => {
+                            if (ref.kind === "record") {
+                              const rec = recordsById.get(ref.id);
+                              return (
+                                <span
+                                  key={`r${ref.id}`}
+                                  className="inline-flex items-center gap-1 rounded-full bg-white px-2 py-0.5 text-xs text-gray-600 ring-1 ring-amber-200"
+                                >
+                                  💊 {rec ? rec.drug_name : `記録 #${ref.id}`}
+                                </span>
+                              );
+                            }
+                            const tc = commentsById.get(ref.id);
                             return (
                               <span
-                                key={rid}
-                                className="inline-flex items-center gap-1 rounded-full bg-white px-2 py-0.5 text-xs text-gray-600 ring-1 ring-amber-200"
+                                key={`c${ref.id}`}
+                                className="inline-flex items-center gap-1 rounded-full bg-white px-2 py-0.5 text-xs text-gray-600 ring-1 ring-blue-200"
                               >
-                                💊 {rec ? rec.drug_name : `記録 #${rid}`}
+                                💬 {tc ? excerpt(tc.body) : `コメント #${ref.id}`}
                               </span>
                             );
                           })}

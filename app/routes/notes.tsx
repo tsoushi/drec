@@ -4,7 +4,7 @@ import { Link, useFetcher, useNavigation, useSearchParams } from "react-router";
 import type { Route } from "./+types/notes";
 import { getNotesPage } from "../db/notes.server";
 import type { Rec } from "../db/records.server";
-import type { Comment } from "../db/comments.server";
+import type { Comment, MentionRef } from "../db/comments.server";
 import { drugColor } from "../lib/colors";
 import {
   dateKey,
@@ -51,6 +51,16 @@ type DayGroup = {
 
 type Composer = { day: string; editing: Comment | null };
 
+/** Record ids among a comment's mentions (this screen only manages records). */
+function recordIdsOf(mentions: MentionRef[]): number[] {
+  return mentions.filter((m) => m.kind === "record").map((m) => m.id);
+}
+/** One-line preview of a comment body for compact mention chips. */
+function excerpt(s: string, n = 14): string {
+  const t = s.replace(/\s+/g, " ").trim();
+  return t.length > n ? `${t.slice(0, n)}…` : t;
+}
+
 export default function Notes({ loaderData }: Route.ComponentProps) {
   const { records, comments, mentionedRecords, hasMore, days } = loaderData;
   const fetcher = useFetcher<ActionResult>();
@@ -82,6 +92,12 @@ export default function Notes({ loaderData }: Route.ComponentProps) {
     return m;
   }, [records, mentionedRecords]);
 
+  const commentsById = useMemo(() => {
+    const m = new Map<number, Comment>();
+    for (const c of comments) m.set(c.id, c);
+    return m;
+  }, [comments]);
+
   // Per-day sequence number of each in-window record (1 = first dose of the day).
   const seqById = useMemo(() => {
     const m = new Map<number, number>();
@@ -102,7 +118,8 @@ export default function Notes({ loaderData }: Route.ComponentProps) {
   const commentCountByRec = useMemo(() => {
     const m = new Map<number, number>();
     for (const c of comments)
-      for (const rid of c.mentions) m.set(rid, (m.get(rid) ?? 0) + 1);
+      for (const ref of c.mentions)
+        if (ref.kind === "record") m.set(ref.id, (m.get(ref.id) ?? 0) + 1);
     return m;
   }, [comments]);
 
@@ -227,10 +244,23 @@ export default function Notes({ loaderData }: Route.ComponentProps) {
   }
 
   function flashComments(rid: number) {
-    const ids = comments.filter((c) => c.mentions.includes(rid)).map((c) => c.id);
+    const ids = comments
+      .filter((c) =>
+        c.mentions.some((ref) => ref.kind === "record" && ref.id === rid),
+      )
+      .map((c) => c.id);
     if (ids.length === 0) return;
     setHighlightComments(ids);
     document.getElementById(`note-com-${ids[0]}`)?.scrollIntoView({
+      behavior: "smooth",
+      block: "center",
+    });
+    window.setTimeout(() => setHighlightComments([]), 1600);
+  }
+
+  function flashComment(id: number) {
+    setHighlightComments([id]);
+    document.getElementById(`note-com-${id}`)?.scrollIntoView({
       behavior: "smooth",
       block: "center",
     });
@@ -312,11 +342,17 @@ export default function Notes({ loaderData }: Route.ComponentProps) {
                           editing={composer?.editing?.id === item.comment.id}
                           highlighted={highlightComments.includes(item.comment.id)}
                           recordsById={recordsById}
+                          commentsById={commentsById}
                           seqById={seqById}
                           onEdit={(c) =>
-                            openComposer(dateKey(c.commented_at), c, c.mentions)
+                            openComposer(
+                              dateKey(c.commented_at),
+                              c,
+                              recordIdsOf(c.mentions),
+                            )
                           }
                           onMentionClick={flashRecord}
+                          onCommentMentionClick={flashComment}
                         />
                       ),
                     )}
@@ -345,7 +381,14 @@ export default function Notes({ loaderData }: Route.ComponentProps) {
                   <input
                     type="hidden"
                     name="mentions"
-                    value={mentions.join(",")}
+                    value={[
+                      // Record mentions are what this screen edits; comment
+                      // mentions (set on the home screen) are preserved as-is.
+                      ...mentions.map((id) => `r${id}`),
+                      ...(composer.editing?.mentions ?? [])
+                        .filter((ref) => ref.kind === "comment")
+                        .map((ref) => `c${ref.id}`),
+                    ].join(",")}
                   />
                   <input
                     type="hidden"
@@ -555,17 +598,21 @@ function NoteCommentRow({
   editing,
   highlighted,
   recordsById,
+  commentsById,
   seqById,
   onEdit,
   onMentionClick,
+  onCommentMentionClick,
 }: {
   c: Comment;
   editing: boolean;
   highlighted: boolean;
   recordsById: Map<number, Rec>;
+  commentsById: Map<number, Comment>;
   seqById: Map<number, number>;
   onEdit: (c: Comment) => void;
   onMentionClick: (rid: number) => void;
+  onCommentMentionClick: (id: number) => void;
 }) {
   const del = useFetcher();
   const [confirming, setConfirming] = useState(false);
@@ -603,32 +650,52 @@ function NoteCommentRow({
             </div>
             {c.mentions.length > 0 && (
               <div className="mt-2 flex flex-wrap gap-1.5">
-                {c.mentions.map((rid) => {
-                  const rec = recordsById.get(rid);
-                  const seq = seqById.get(rid);
-                  const sameDay = rec && dateKey(rec.taken_at) === commentDay;
+                {c.mentions.map((ref) => {
+                  if (ref.kind === "record") {
+                    const rec = recordsById.get(ref.id);
+                    const seq = seqById.get(ref.id);
+                    const sameDay = rec && dateKey(rec.taken_at) === commentDay;
+                    return (
+                      <button
+                        key={`r${ref.id}`}
+                        type="button"
+                        onClick={() =>
+                          rec && seq != null && onMentionClick(ref.id)
+                        }
+                        className="inline-flex items-center gap-1 rounded-full bg-white px-2.5 py-1 text-xs text-gray-700 ring-1 ring-amber-200 hover:bg-amber-100"
+                      >
+                        {rec ? (
+                          <>
+                            <SeqDot seq={seq} color={drugColor(rec.drug_name)} />
+                            {rec.drug_name}
+                            {!sameDay && (
+                              <span className="text-gray-400">
+                                {formatTaken(rec.taken_at)}
+                              </span>
+                            )}
+                            <span className="font-semibold text-amber-700">
+                              {mentionDiffLabel(c.commented_at, rec.taken_at)}
+                            </span>
+                          </>
+                        ) : (
+                          `記録 #${ref.id}`
+                        )}
+                      </button>
+                    );
+                  }
+                  const tc = commentsById.get(ref.id);
                   return (
                     <button
-                      key={rid}
+                      key={`c${ref.id}`}
                       type="button"
-                      onClick={() => rec && seq != null && onMentionClick(rid)}
-                      className="inline-flex items-center gap-1 rounded-full bg-white px-2.5 py-1 text-xs text-gray-700 ring-1 ring-amber-200 hover:bg-amber-100"
+                      onClick={() => tc && onCommentMentionClick(ref.id)}
+                      className="inline-flex items-center gap-1 rounded-full bg-white px-2.5 py-1 text-xs text-gray-700 ring-1 ring-blue-200 hover:bg-blue-50"
                     >
-                      {rec ? (
-                        <>
-                          <SeqDot seq={seq} color={drugColor(rec.drug_name)} />
-                          {rec.drug_name}
-                          {!sameDay && (
-                            <span className="text-gray-400">
-                              {formatTaken(rec.taken_at)}
-                            </span>
-                          )}
-                          <span className="font-semibold text-amber-700">
-                            {mentionDiffLabel(c.commented_at, rec.taken_at)}
-                          </span>
-                        </>
-                      ) : (
-                        `記録 #${rid}`
+                      💬 {tc ? excerpt(tc.body) : `コメント #${ref.id}`}
+                      {tc && (
+                        <span className="font-semibold text-amber-700">
+                          {mentionDiffLabel(c.commented_at, tc.commented_at)}
+                        </span>
                       )}
                     </button>
                   );

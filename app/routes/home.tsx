@@ -18,6 +18,7 @@ import {
   updateComment,
   type Comment,
   type CommentInput,
+  type MentionRef,
 } from "../db/comments.server";
 import {
   agoLabel,
@@ -39,6 +40,27 @@ import {
 } from "../lib/menu";
 
 const COMMON_UNITS = ["mg", "g", "錠", "mL", "包", "滴", "単位", "回"];
+
+// --- mention-reference helpers (records use "r<id>", comments use "c<id>") ---
+function refTag(ref: MentionRef): string {
+  return `${ref.kind === "record" ? "r" : "c"}${ref.id}`;
+}
+function sameRef(a: MentionRef | null, b: MentionRef | null): boolean {
+  return !!a && !!b && a.kind === b.kind && a.id === b.id;
+}
+function hasRef(list: MentionRef[], ref: MentionRef): boolean {
+  return list.some((x) => x.kind === ref.kind && x.id === ref.id);
+}
+function toggleRef(list: MentionRef[], ref: MentionRef): MentionRef[] {
+  return hasRef(list, ref)
+    ? list.filter((x) => !(x.kind === ref.kind && x.id === ref.id))
+    : [...list, ref];
+}
+/** One-line preview of a comment body for compact mention chips. */
+function excerpt(s: string, n = 14): string {
+  const t = s.replace(/\s+/g, " ").trim();
+  return t.length > n ? `${t.slice(0, n)}…` : t;
+}
 
 export function meta(_: Route.MetaArgs) {
   return [{ title: "drec" }];
@@ -103,14 +125,19 @@ function parseCommentInput(fd: FormData): { input?: CommentInput; error?: string
   const commentedAt = normalizeLocalInput(String(fd.get("taken_at") ?? ""));
   if (!commentedAt) return { error: "コメント時刻が不正です" };
 
-  const mentions = Array.from(
-    new Set(
-      String(fd.get("mentions") ?? "")
-        .split(",")
-        .map((s) => Number(s.trim()))
-        .filter((n) => Number.isInteger(n) && n > 0),
-    ),
-  );
+  // Mentions arrive as tagged ids: "r<id>" for records, "c<id>" for comments.
+  const mentions: MentionRef[] = [];
+  const seenMentions = new Set<string>();
+  for (const raw of String(fd.get("mentions") ?? "").split(",")) {
+    const m = /^([rc])(\d+)$/.exec(raw.trim());
+    if (!m) continue;
+    const id = Number(m[2]);
+    if (!Number.isInteger(id) || id <= 0) continue;
+    const key = `${m[1]}${id}`;
+    if (seenMentions.has(key)) continue;
+    seenMentions.add(key);
+    mentions.push({ kind: m[1] === "r" ? "record" : "comment", id });
+  }
 
   const errRaw = String(fd.get("taken_error_min") ?? "").trim();
   const errNum = errRaw === "" ? null : Number(errRaw);
@@ -189,8 +216,8 @@ export default function Home({ loaderData }: Route.ComponentProps) {
   const [manualTime, setManualTime] = useState(false);
   const [manualText, setManualText] = useState("");
   const [takenError, setTakenError] = useState("");
-  const [commentMentions, setCommentMentions] = useState<number[]>([]);
-  const [highlightId, setHighlightId] = useState<number | null>(null);
+  const [commentMentions, setCommentMentions] = useState<MentionRef[]>([]);
+  const [highlight, setHighlight] = useState<MentionRef | null>(null);
   const [formKey, setFormKey] = useState(0);
   const [nowMs, setNowMs] = useState<number | null>(null);
   const [menu, setMenu] = useState<MenuItem[]>(DEFAULT_MENU);
@@ -205,6 +232,12 @@ export default function Home({ loaderData }: Route.ComponentProps) {
     for (const r of records) m.set(r.id, r);
     return m;
   }, [records]);
+
+  const commentsById = useMemo(() => {
+    const m = new Map<number, Comment>();
+    for (const c of comments) m.set(c.id, c);
+    return m;
+  }, [comments]);
 
   // Records and comments merged into one newest-first timeline.
   const timeline = useMemo(() => {
@@ -347,36 +380,53 @@ export default function Home({ loaderData }: Route.ComponentProps) {
     window.scrollTo({ top: 0, behavior: "smooth" });
   }
 
-  function commentOnRecord(r: Rec) {
-    if (mode === "comment") {
-      // accumulate a mention onto the in-progress OR edited comment (keeps body)
-      setCommentMentions((cur) => (cur.includes(r.id) ? cur : [...cur, r.id]));
-    } else {
-      setMode("comment");
-      setEditing(null);
-      setCopying(null);
-      setEditingComment(null);
-      setCommentMentions([r.id]);
-      setTakenError("");
-      setNow();
-      setFormKey((k) => k + 1);
-    }
+  /** Open a fresh comment form seeded with a single mention (from record mode). */
+  function startCommentWith(ref: MentionRef) {
+    setMode("comment");
+    setEditing(null);
+    setCopying(null);
+    setEditingComment(null);
+    setCommentMentions([ref]);
+    setTakenError("");
+    setNow();
+    setFormKey((k) => k + 1);
     window.scrollTo({ top: 0, behavior: "smooth" });
     window.setTimeout(() => bodyRef.current?.focus(), 0);
   }
 
-  function removeMention(rid: number) {
-    setCommentMentions((cur) => cur.filter((x) => x !== rid));
+  function commentOnRecord(r: Rec) {
+    const ref: MentionRef = { kind: "record", id: r.id };
+    // While composing/editing a comment, toggle the mention in place — keep the
+    // body and the current scroll position (don't jump back to the top).
+    if (mode === "comment") setCommentMentions((cur) => toggleRef(cur, ref));
+    else startCommentWith(ref);
   }
 
-  function highlightRecord(rid: number) {
-    setHighlightId(rid);
-    document.getElementById(`rec-${rid}`)?.scrollIntoView({
+  function commentOnComment(c: Comment) {
+    const ref: MentionRef = { kind: "comment", id: c.id };
+    if (mode === "comment") {
+      if (editingComment?.id === c.id) return; // a comment can't mention itself
+      setCommentMentions((cur) => toggleRef(cur, ref));
+    } else {
+      startCommentWith(ref);
+    }
+  }
+
+  function removeMention(ref: MentionRef) {
+    setCommentMentions((cur) =>
+      cur.filter((x) => !(x.kind === ref.kind && x.id === ref.id)),
+    );
+  }
+
+  function highlightItem(ref: MentionRef) {
+    setHighlight(ref);
+    const domId = ref.kind === "record" ? `rec-${ref.id}` : `cmt-${ref.id}`;
+    document.getElementById(domId)?.scrollIntoView({
       behavior: "smooth",
       block: "center",
     });
     window.setTimeout(
-      () => setHighlightId((cur) => (cur === rid ? null : cur)),
+      () => setHighlight((cur) => (sameRef(cur, ref) ? null : cur)),
       1600,
     );
   }
@@ -618,7 +668,7 @@ export default function Home({ loaderData }: Route.ComponentProps) {
             <input
               type="hidden"
               name="mentions"
-              value={commentMentions.join(",")}
+              value={commentMentions.map(refTag).join(",")}
             />
             <label className="block">
               <span className="text-sm font-medium text-gray-700">コメント *</span>
@@ -639,22 +689,55 @@ export default function Home({ loaderData }: Route.ComponentProps) {
                   メンション
                 </span>
                 <div className="mt-1 flex flex-wrap gap-1.5">
-                  {commentMentions.map((rid) => {
-                    const rec = recordsById.get(rid);
+                  {commentMentions.map((ref) => {
+                    if (ref.kind === "record") {
+                      const rec = recordsById.get(ref.id);
+                      const dose =
+                        rec && rec.amount != null
+                          ? `${rec.amount}${rec.unit ?? ""}`
+                          : (rec?.unit ?? "");
+                      return (
+                        <span
+                          key={refTag(ref)}
+                          className="inline-flex items-center gap-1 rounded-full bg-gray-100 px-2.5 py-1 text-xs text-gray-700"
+                        >
+                          💊 {rec ? rec.drug_name : `記録 #${ref.id}`}
+                          {dose && (
+                            <span className="font-medium text-gray-600">
+                              {dose}
+                            </span>
+                          )}
+                          {rec && (
+                            <span className="text-gray-400">
+                              {formatTaken(rec.taken_at)}
+                            </span>
+                          )}
+                          <button
+                            type="button"
+                            onClick={() => removeMention(ref)}
+                            className="ml-0.5 text-gray-400 hover:text-gray-700"
+                            aria-label="メンションを外す"
+                          >
+                            ×
+                          </button>
+                        </span>
+                      );
+                    }
+                    const tc = commentsById.get(ref.id);
                     return (
                       <span
-                        key={rid}
-                        className="inline-flex items-center gap-1 rounded-full bg-gray-100 px-2.5 py-1 text-xs text-gray-700"
+                        key={refTag(ref)}
+                        className="inline-flex items-center gap-1 rounded-full bg-blue-50 px-2.5 py-1 text-xs text-gray-700 ring-1 ring-blue-200"
                       >
-                        💊 {rec ? rec.drug_name : `記録 #${rid}`}
-                        {rec && (
+                        💬 {tc ? excerpt(tc.body) : `コメント #${ref.id}`}
+                        {tc && (
                           <span className="text-gray-400">
-                            {formatTaken(rec.taken_at)}
+                            {formatTaken(tc.commented_at)}
                           </span>
                         )}
                         <button
                           type="button"
-                          onClick={() => removeMention(rid)}
+                          onClick={() => removeMention(ref)}
                           className="ml-0.5 text-gray-400 hover:text-gray-700"
                           aria-label="メンションを外す"
                         >
@@ -739,7 +822,17 @@ export default function Home({ loaderData }: Route.ComponentProps) {
                     <RecordRow
                       r={item.rec}
                       editing={editing?.id === item.rec.id}
-                      highlighted={highlightId === item.rec.id}
+                      mentioned={
+                        mode === "comment" &&
+                        hasRef(commentMentions, {
+                          kind: "record",
+                          id: item.rec.id,
+                        })
+                      }
+                      highlighted={sameRef(highlight, {
+                        kind: "record",
+                        id: item.rec.id,
+                      })}
                       nowMs={nowMs}
                       onEdit={startEdit}
                       onCopy={startCopy}
@@ -749,10 +842,24 @@ export default function Home({ loaderData }: Route.ComponentProps) {
                     <CommentRow
                       c={item.comment}
                       editing={editingComment?.id === item.comment.id}
+                      mentioned={
+                        mode === "comment" &&
+                        editingComment?.id !== item.comment.id &&
+                        hasRef(commentMentions, {
+                          kind: "comment",
+                          id: item.comment.id,
+                        })
+                      }
+                      highlighted={sameRef(highlight, {
+                        kind: "comment",
+                        id: item.comment.id,
+                      })}
                       recordsById={recordsById}
+                      commentsById={commentsById}
                       nowMs={nowMs}
                       onEdit={startEditComment}
-                      onMentionClick={highlightRecord}
+                      onComment={commentOnComment}
+                      onMentionClick={highlightItem}
                     />
                   )}
                 </Fragment>
@@ -876,6 +983,7 @@ function ErrorField({
 function RecordRow({
   r,
   editing,
+  mentioned,
   highlighted,
   nowMs,
   onEdit,
@@ -884,6 +992,7 @@ function RecordRow({
 }: {
   r: Rec;
   editing: boolean;
+  mentioned: boolean;
   highlighted: boolean;
   nowMs: number | null;
   onEdit: (r: Rec) => void;
@@ -906,9 +1015,11 @@ function RecordRow({
       className={`scroll-mt-4 rounded-xl border bg-white p-3 shadow-sm transition ${
         editing
           ? "border-gray-900"
-          : highlighted
-            ? "border-amber-400 ring-2 ring-amber-300"
-            : "border-gray-200"
+          : mentioned
+            ? "border-blue-500 ring-2 ring-blue-200"
+            : highlighted
+              ? "border-amber-400 ring-2 ring-amber-300"
+              : "border-gray-200"
       } ${busy ? "opacity-40" : ""}`}
     >
       <div className="flex items-start justify-between gap-3">
@@ -948,9 +1059,13 @@ function RecordRow({
             <button
               type="button"
               onClick={() => onComment(r)}
-              className="rounded-md px-2 py-1 text-xs font-medium text-gray-700 hover:bg-gray-100"
+              className={`rounded-md px-2 py-1 text-xs font-medium ${
+                mentioned
+                  ? "bg-blue-500 text-white"
+                  : "text-gray-700 hover:bg-gray-100"
+              }`}
             >
-              コメント
+              {mentioned ? "参照中" : "コメント"}
             </button>
           </div>
           <div className="flex gap-1">
@@ -997,17 +1112,25 @@ function RecordRow({
 function CommentRow({
   c,
   editing,
+  mentioned,
+  highlighted,
   recordsById,
+  commentsById,
   nowMs,
   onEdit,
+  onComment,
   onMentionClick,
 }: {
   c: Comment;
   editing: boolean;
+  mentioned: boolean;
+  highlighted: boolean;
   recordsById: Map<number, Rec>;
+  commentsById: Map<number, Comment>;
   nowMs: number | null;
   onEdit: (c: Comment) => void;
-  onMentionClick: (id: number) => void;
+  onComment: (c: Comment) => void;
+  onMentionClick: (ref: MentionRef) => void;
 }) {
   const del = useFetcher();
   const [confirming, setConfirming] = useState(false);
@@ -1021,8 +1144,15 @@ function CommentRow({
 
   return (
     <li
-      className={`rounded-xl border bg-amber-50 p-3 shadow-sm transition ${
-        editing ? "border-gray-900" : "border-amber-200"
+      id={`cmt-${c.id}`}
+      className={`scroll-mt-4 rounded-xl border bg-amber-50 p-3 shadow-sm transition ${
+        editing
+          ? "border-gray-900"
+          : mentioned
+            ? "border-blue-500 ring-2 ring-blue-200"
+            : highlighted
+              ? "border-amber-400 ring-2 ring-amber-300"
+              : "border-amber-200"
       } ${busy ? "opacity-40" : ""}`}
     >
       <div className="flex items-start justify-between gap-3">
@@ -1040,24 +1170,54 @@ function CommentRow({
           </div>
           {c.mentions.length > 0 && (
             <div className="mt-2 flex flex-wrap gap-1.5">
-              {c.mentions.map((rid) => {
-                const rec = recordsById.get(rid);
+              {c.mentions.map((ref) => {
+                if (ref.kind === "record") {
+                  const rec = recordsById.get(ref.id);
+                  const dose =
+                    rec && rec.amount != null
+                      ? `${rec.amount}${rec.unit ?? ""}`
+                      : (rec?.unit ?? "");
+                  return (
+                    <button
+                      key={refTag(ref)}
+                      type="button"
+                      onClick={() => onMentionClick(ref)}
+                      className="inline-flex items-center gap-1 rounded-full bg-white px-2.5 py-1 text-xs text-gray-700 ring-1 ring-amber-200 hover:bg-amber-100"
+                    >
+                      💊 {rec ? rec.drug_name : `記録 #${ref.id}`}
+                      {dose && (
+                        <span className="font-medium text-gray-600">{dose}</span>
+                      )}
+                      {rec && (
+                        <span className="text-gray-400">
+                          {formatTaken(rec.taken_at)}
+                        </span>
+                      )}
+                      {rec && (
+                        <span className="font-semibold text-amber-700">
+                          {mentionDiffLabel(c.commented_at, rec.taken_at)}
+                        </span>
+                      )}
+                    </button>
+                  );
+                }
+                const tc = commentsById.get(ref.id);
                 return (
                   <button
-                    key={rid}
+                    key={refTag(ref)}
                     type="button"
-                    onClick={() => onMentionClick(rid)}
-                    className="inline-flex items-center gap-1 rounded-full bg-white px-2.5 py-1 text-xs text-gray-700 ring-1 ring-amber-200 hover:bg-amber-100"
+                    onClick={() => onMentionClick(ref)}
+                    className="inline-flex items-center gap-1 rounded-full bg-white px-2.5 py-1 text-xs text-gray-700 ring-1 ring-blue-200 hover:bg-blue-50"
                   >
-                    💊 {rec ? rec.drug_name : `記録 #${rid}`}
-                    {rec && (
+                    💬 {tc ? excerpt(tc.body) : `コメント #${ref.id}`}
+                    {tc && (
                       <span className="text-gray-400">
-                        {formatTaken(rec.taken_at)}
+                        {formatTaken(tc.commented_at)}
                       </span>
                     )}
-                    {rec && (
+                    {tc && (
                       <span className="font-semibold text-amber-700">
-                        {mentionDiffLabel(c.commented_at, rec.taken_at)}
+                        {mentionDiffLabel(c.commented_at, tc.commented_at)}
                       </span>
                     )}
                   </button>
@@ -1068,6 +1228,19 @@ function CommentRow({
         </div>
 
         <div className="flex shrink-0 flex-col items-end gap-1">
+          {!editing && (
+            <button
+              type="button"
+              onClick={() => onComment(c)}
+              className={`rounded-md px-2 py-1 text-xs font-medium ${
+                mentioned
+                  ? "bg-blue-500 text-white"
+                  : "text-gray-700 hover:bg-amber-100"
+              }`}
+            >
+              {mentioned ? "参照中" : "参照"}
+            </button>
+          )}
           <button
             type="button"
             onClick={() => onEdit(c)}

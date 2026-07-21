@@ -102,6 +102,18 @@ const MIGRATIONS: Array<(db: Database.Database) => void> = [
       DELETE FROM graph_settings WHERE drug_name LIKE 'tag:%';
     `);
   },
+  // v9 — comments can also mention other comments (not just records)
+  (db) => {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS comment_comment_mentions (
+        comment_id        INTEGER NOT NULL,
+        target_comment_id INTEGER NOT NULL,
+        PRIMARY KEY (comment_id, target_comment_id)
+      );
+      CREATE INDEX IF NOT EXISTS idx_comment_comment_mentions_target
+        ON comment_comment_mentions (target_comment_id);
+    `);
+  },
 ];
 
 function migrate(db: Database.Database): void {

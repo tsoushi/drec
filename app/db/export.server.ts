@@ -1,29 +1,44 @@
 import { db } from "./db.server";
 import type { Rec } from "./records.server";
-import type { Comment } from "./comments.server";
+import {
+  buildMentions,
+  recordIdsOf,
+  type Comment,
+  type MentionRef,
+} from "./comments.server";
 import { nowLocalISO } from "../lib/time";
 
 // Read-only full dumps for the /export screen. Exports intentionally include
 // soft-deleted rows (deleted_at set) — this is a backup, not a view.
 
-type CommentRow = Omit<Comment, "mentions"> & { mention_ids: string | null };
+type CommentRow = Omit<Comment, "mentions"> & {
+  record_mention_ids: string | null;
+  comment_mention_ids: string | null;
+};
 
 const allRecordsStmt = db.prepare(`SELECT * FROM records ORDER BY id`);
 const allCommentsStmt = db.prepare(
   `SELECT c.*,
-          (SELECT group_concat(record_id) FROM comment_mentions WHERE comment_id = c.id) AS mention_ids
+          (SELECT group_concat(record_id) FROM comment_mentions
+            WHERE comment_id = c.id) AS record_mention_ids,
+          (SELECT group_concat(target_comment_id) FROM comment_comment_mentions
+            WHERE comment_id = c.id) AS comment_mention_ids
      FROM comments c
     ORDER BY c.id`,
 );
 
 function allComments(): Comment[] {
   return (allCommentsStmt.all() as CommentRow[]).map((r) => {
-    const { mention_ids, ...rest } = r;
+    const { record_mention_ids, comment_mention_ids, ...rest } = r;
     return {
       ...rest,
-      mentions: mention_ids ? mention_ids.split(",").map(Number) : [],
+      mentions: buildMentions(record_mention_ids, comment_mention_ids),
     };
   });
+}
+
+function commentIdsOf(mentions: MentionRef[]): number[] {
+  return mentions.filter((m) => m.kind === "comment").map((m) => m.id);
 }
 
 export function getExportCounts() {
@@ -94,6 +109,7 @@ export function exportCommentsCSV(): string {
       "commented_at",
       "commented_error_min",
       "mention_record_ids",
+      "mention_comment_ids",
       "created_at",
       "updated_at",
       "deleted_at",
@@ -103,7 +119,8 @@ export function exportCommentsCSV(): string {
       c.body,
       c.commented_at,
       c.commented_error_min,
-      c.mentions.join(";"),
+      recordIdsOf(c.mentions).join(";"),
+      commentIdsOf(c.mentions).join(";"),
       c.created_at,
       c.updated_at,
       c.deleted_at,
