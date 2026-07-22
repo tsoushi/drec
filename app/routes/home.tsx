@@ -1,3 +1,4 @@
+import type { MouseEvent as ReactMouseEvent } from "react";
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useFetcher } from "react-router";
 
@@ -66,9 +67,6 @@ function scoreFace(score: number): string {
   if (score > -3) return "😐";
   if (score > -7) return "🙁";
   return "😣";
-}
-function sameRef(a: MentionRef | null, b: MentionRef | null): boolean {
-  return !!a && !!b && a.kind === b.kind && a.id === b.id;
 }
 function hasRef(list: MentionRef[], ref: MentionRef): boolean {
   return list.some((x) => x.kind === ref.kind && x.id === ref.id);
@@ -286,7 +284,7 @@ export default function Home({ loaderData }: Route.ComponentProps) {
   const [manualText, setManualText] = useState("");
   const [takenError, setTakenError] = useState("");
   const [commentMentions, setCommentMentions] = useState<MentionRef[]>([]);
-  const [highlight, setHighlight] = useState<MentionRef | null>(null);
+  const [highlights, setHighlights] = useState<MentionRef[]>([]);
   const [formKey, setFormKey] = useState(0);
   const [nowMs, setNowMs] = useState<number | null>(null);
   const [menu, setMenu] = useState<MenuItem[]>(DEFAULT_MENU);
@@ -295,6 +293,7 @@ export default function Home({ loaderData }: Route.ComponentProps) {
   const drugRef = useRef<HTMLInputElement>(null);
   const bodyRef = useRef<HTMLTextAreaElement>(null);
   const busyRef = useRef(false);
+  const highlightTokenRef = useRef(0);
 
   const recordsById = useMemo(() => {
     const m = new Map<number, Rec>();
@@ -524,22 +523,35 @@ export default function Home({ loaderData }: Route.ComponentProps) {
     );
   }
 
-  function highlightItem(ref: MentionRef) {
-    setHighlight(ref);
+  // Highlight one or more timeline items (tap a mention chip → the single
+  // target; long-press a chip → every mention of that comment). A token guards
+  // against a newer highlight being cleared by an older auto-clear timer.
+  function flashHighlights(refs: MentionRef[], scrollTo?: MentionRef) {
+    if (refs.length === 0) return;
+    const token = ++highlightTokenRef.current;
+    setHighlights(refs);
+    const target = scrollTo ?? refs[0];
     const domId =
-      ref.kind === "record"
-        ? `rec-${ref.id}`
-        : ref.kind === "comment"
-          ? `cmt-${ref.id}`
-          : `men-${ref.id}`;
+      target.kind === "record"
+        ? `rec-${target.id}`
+        : target.kind === "comment"
+          ? `cmt-${target.id}`
+          : `men-${target.id}`;
     document.getElementById(domId)?.scrollIntoView({
       behavior: "smooth",
       block: "center",
     });
-    window.setTimeout(
-      () => setHighlight((cur) => (sameRef(cur, ref) ? null : cur)),
-      1600,
-    );
+    window.setTimeout(() => {
+      if (highlightTokenRef.current === token) setHighlights([]);
+    }, 1600);
+  }
+
+  function highlightItem(ref: MentionRef) {
+    flashHighlights([ref]);
+  }
+
+  function highlightAll(refs: MentionRef[]) {
+    flashHighlights(refs);
   }
 
   const units = Array.from(new Set([...COMMON_UNITS, ...suggestions.units]));
@@ -1000,7 +1012,7 @@ export default function Home({ loaderData }: Route.ComponentProps) {
                           id: item.rec.id,
                         })
                       }
-                      highlighted={sameRef(highlight, {
+                      highlighted={hasRef(highlights, {
                         kind: "record",
                         id: item.rec.id,
                       })}
@@ -1021,7 +1033,7 @@ export default function Home({ loaderData }: Route.ComponentProps) {
                           id: item.comment.id,
                         })
                       }
-                      highlighted={sameRef(highlight, {
+                      highlighted={hasRef(highlights, {
                         kind: "comment",
                         id: item.comment.id,
                       })}
@@ -1032,6 +1044,7 @@ export default function Home({ loaderData }: Route.ComponentProps) {
                       onEdit={startEditComment}
                       onComment={commentOnComment}
                       onMentionClick={highlightItem}
+                      onMentionLongPress={highlightAll}
                     />
                   ) : (
                     <MentalRow
@@ -1044,7 +1057,7 @@ export default function Home({ loaderData }: Route.ComponentProps) {
                           id: item.mental.id,
                         })
                       }
-                      highlighted={sameRef(highlight, {
+                      highlighted={hasRef(highlights, {
                         kind: "mental",
                         id: item.mental.id,
                       })}
@@ -1364,6 +1377,7 @@ function CommentRow({
   onEdit,
   onComment,
   onMentionClick,
+  onMentionLongPress,
 }: {
   c: Comment;
   editing: boolean;
@@ -1376,11 +1390,47 @@ function CommentRow({
   onEdit: (c: Comment) => void;
   onComment: (c: Comment) => void;
   onMentionClick: (ref: MentionRef) => void;
+  onMentionLongPress: (refs: MentionRef[]) => void;
 }) {
   const del = useFetcher();
   const [confirming, setConfirming] = useState(false);
   const busy = del.state !== "idle";
   const ago = nowMs != null ? agoLabel(c.commented_at, nowMs) : null;
+
+  // Long-press a mention chip → highlight every mention of this comment;
+  // a plain tap still highlights just that one target. The timer distinguishes
+  // the two, and `longFired` suppresses the click that follows a long press.
+  const pressTimer = useRef<number | null>(null);
+  const longFired = useRef(false);
+  function clearPress() {
+    if (pressTimer.current != null) {
+      window.clearTimeout(pressTimer.current);
+      pressTimer.current = null;
+    }
+  }
+  function onChipPointerDown() {
+    longFired.current = false;
+    clearPress();
+    pressTimer.current = window.setTimeout(() => {
+      longFired.current = true;
+      onMentionLongPress(c.mentions);
+    }, 500);
+  }
+  function onChipClick(ref: MentionRef) {
+    clearPress();
+    if (longFired.current) {
+      longFired.current = false;
+      return;
+    }
+    onMentionClick(ref);
+  }
+  const chipPressProps = {
+    onPointerDown: onChipPointerDown,
+    onPointerUp: clearPress,
+    onPointerLeave: clearPress,
+    onPointerCancel: clearPress,
+    onContextMenu: (e: ReactMouseEvent) => e.preventDefault(),
+  };
 
   function remove() {
     setConfirming(false);
@@ -1426,7 +1476,8 @@ function CommentRow({
                     <button
                       key={refTag(ref)}
                       type="button"
-                      onClick={() => onMentionClick(ref)}
+                      onClick={() => onChipClick(ref)}
+                      {...chipPressProps}
                       className="inline-flex items-center gap-1 rounded-full bg-white px-2.5 py-1 text-xs text-gray-700 ring-1 ring-amber-200 hover:bg-amber-100"
                     >
                       💊 {rec ? rec.drug_name : `記録 #${ref.id}`}
@@ -1452,7 +1503,8 @@ function CommentRow({
                     <button
                       key={refTag(ref)}
                       type="button"
-                      onClick={() => onMentionClick(ref)}
+                      onClick={() => onChipClick(ref)}
+                      {...chipPressProps}
                       className="inline-flex items-center gap-1 rounded-full bg-white px-2.5 py-1 text-xs text-gray-700 ring-1 ring-violet-200 hover:bg-violet-50"
                     >
                       {mx ? scoreFace(mx.score) : "🧠"} メンタル
@@ -1479,7 +1531,8 @@ function CommentRow({
                   <button
                     key={refTag(ref)}
                     type="button"
-                    onClick={() => onMentionClick(ref)}
+                    onClick={() => onChipClick(ref)}
+                    {...chipPressProps}
                     className="inline-flex items-center gap-1 rounded-full bg-white px-2.5 py-1 text-xs text-gray-700 ring-1 ring-blue-200 hover:bg-blue-50"
                   >
                     💬 {tc ? excerpt(tc.body) : `コメント #${ref.id}`}
