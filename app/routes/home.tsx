@@ -1208,7 +1208,7 @@ function ScoreField({
         type="range"
         min="-10"
         max="10"
-        step="0.1"
+        step="0.5"
         value={safe}
         onChange={(e) => onChange(e.target.value)}
         aria-label="メンタルスコア"
