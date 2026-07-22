@@ -114,6 +114,31 @@ const MIGRATIONS: Array<(db: Database.Database) => void> = [
         ON comment_comment_mentions (target_comment_id);
     `);
   },
+  // v10 — mental-state records (own timeline position, -10..10 score) plus a
+  // mention table so comments can reference them. Score is REAL (decimals OK).
+  (db) => {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS mental_states (
+        id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+        score              REAL    NOT NULL,
+        recorded_at        TEXT    NOT NULL,
+        recorded_error_min INTEGER,
+        created_at         TEXT    NOT NULL,
+        updated_at         TEXT    NOT NULL,
+        deleted_at         TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_mental_states_active
+        ON mental_states (deleted_at, recorded_at);
+
+      CREATE TABLE IF NOT EXISTS comment_mental_mentions (
+        comment_id       INTEGER NOT NULL,
+        target_mental_id INTEGER NOT NULL,
+        PRIMARY KEY (comment_id, target_mental_id)
+      );
+      CREATE INDEX IF NOT EXISTS idx_comment_mental_mentions_target
+        ON comment_mental_mentions (target_mental_id);
+    `);
+  },
 ];
 
 function migrate(db: Database.Database): void {
