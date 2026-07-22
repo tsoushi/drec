@@ -9,7 +9,7 @@ import { nowLocalISO } from "../lib/time";
 const LOG_PATH = process.env.DREC_LOG ?? "data/changes.log";
 
 export type ChangeOp = "create" | "update" | "delete";
-export type ChangeEntity = "record" | "comment";
+export type ChangeEntity = "record" | "comment" | "mental";
 
 export function logChange(
   op: ChangeOp,

@@ -2,6 +2,7 @@ import type { Route } from "./+types/export-dl";
 import {
   exportCommentsCSV,
   exportJSON,
+  exportMentalStatesCSV,
   exportRecordsCSV,
 } from "../db/export.server";
 import { nowLocalISO } from "../lib/time";
@@ -25,6 +26,11 @@ export async function loader({ request }: Route.LoaderArgs): Promise<Response> {
       body = exportCommentsCSV();
       type = "text/csv; charset=utf-8";
       name = `drec-comments-${stamp}.csv`;
+      break;
+    case "mentals.csv":
+      body = exportMentalStatesCSV();
+      type = "text/csv; charset=utf-8";
+      name = `drec-mentals-${stamp}.csv`;
       break;
     case "all.json":
       body = exportJSON();

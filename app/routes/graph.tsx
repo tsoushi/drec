@@ -8,6 +8,7 @@ import {
   saveGraphSettings,
   type GraphComment,
   type GraphDose,
+  type GraphMental,
   type GraphSettings,
 } from "../db/graph.server";
 import { formatTaken, isoToSlash, parseLocal } from "../lib/time";
@@ -128,6 +129,9 @@ function drugColor(name: string, allNames: string[]): string {
   return DRUG_COLORS[(i < 0 ? 0 : i) % DRUG_COLORS.length];
 }
 const COMMENT_COLOR = "#2563eb";
+// Mental overlay is drawn on its own fixed -10..10 axis, independent of the
+// concentration scale, so it gets a reserved color of its own.
+const MENTAL_COLOR = "#db2777";
 
 // ---- per-drug settings (persisted in the DB via action) ---------------------
 
@@ -158,6 +162,15 @@ const MB = 28;
 const PW = W - ML - MR;
 const PH = H - MT - MB;
 
+// Mental overlay uses an absolute -10..10 axis: 0 at the vertical center,
+// +10 at the top edge, -10 at the bottom edge — independent of drug scaling.
+const MENTAL_MID = MT + PH / 2;
+function mentalY(score: number): number {
+  const s = Math.max(-10, Math.min(10, score));
+  return MENTAL_MID - (s / 10) * (PH / 2);
+}
+const MENTAL_TICKS = [10, 5, 0, -5, -10];
+
 const fieldClass =
   "mt-1 w-full rounded-lg border border-gray-300 px-3 py-2 text-base outline-none focus:border-gray-900";
 
@@ -170,11 +183,15 @@ type Marker =
       y: number;
       comment: GraphComment;
       concs: Array<{ name: string; color: string; v: number }>;
-    };
+    }
+  | { kind: "mental"; key: string; x: number; y: number; mental: GraphMental };
 
 export default function Graph({ loaderData }: Route.ComponentProps) {
-  const { drugs, doses, comments, settings } = loaderData;
+  const { drugs, doses, comments, mentals, settings } = loaderData;
   const [searchParams, setSearchParams] = useSearchParams();
+
+  // Mental overlay is a persistent, drug-independent toggle (?mental=1).
+  const mentalOn = searchParams.get("mental") === "1";
 
   // ---- selection: one or more drug names, persisted in the URL (?drug=…) ----
   const drugNames = useMemo(() => drugs.map((d) => d.name), [drugs]);
@@ -262,8 +279,16 @@ export default function Graph({ loaderData }: Route.ComponentProps) {
   }
 
   function setSelectedDrugs(names: string[]) {
-    const sp = new URLSearchParams();
+    const sp = new URLSearchParams(searchParams); // keep the mental toggle etc.
+    sp.delete("drug");
     for (const n of names) sp.append("drug", n);
+    setSearchParams(sp, { replace: true, preventScrollReset: true });
+  }
+
+  function toggleMental() {
+    const sp = new URLSearchParams(searchParams);
+    if (mentalOn) sp.delete("mental");
+    else sp.set("mental", "1");
     setSearchParams(sp, { replace: true, preventScrollReset: true });
   }
 
@@ -417,9 +442,27 @@ export default function Graph({ loaderData }: Route.ComponentProps) {
 
     const refVals = series.map((s) => ({ name: s.name, color: s.color, v: s.fn(refMs) }));
 
-    return { lines, area, markers, yLines, xTicks, from, to, refVals };
+    // Mental overlay: a fixed -10..10 axis (0 centered), independent of the
+    // concentration scale. Points are joined into a trend line; each is tappable.
+    let mentalLine: string | null = null;
+    if (mentalOn) {
+      const pts = mentals
+        .map((mm) => ({ t: parseLocal(mm.recorded_at).getTime(), mm }))
+        .filter((p) => p.t >= from && p.t <= to)
+        .sort((a, b) => a.t - b.t);
+      let d = "";
+      for (const p of pts) {
+        const x = X(p.t);
+        const y = mentalY(p.mm.score);
+        d += `${d ? "L" : "M"}${x.toFixed(1)} ${y.toFixed(1)}`;
+        markers.push({ kind: "mental", key: `m${p.mm.id}`, x, y, mental: p.mm });
+      }
+      mentalLine = d || null;
+    }
+
+    return { lines, area, markers, yLines, xTicks, from, to, refVals, mentalLine };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selected, focus, params, dosesByDrug, comments, refMs, windowMs, winH, settings, drugNames]);
+  }, [selected, focus, params, dosesByDrug, comments, mentals, mentalOn, refMs, windowMs, winH, settings, drugNames]);
 
   // Position of the actual "now" line (may differ from center after panning).
   const nowX =
@@ -492,6 +535,29 @@ export default function Graph({ loaderData }: Route.ComponentProps) {
                   </button>
                 );
               })}
+            </div>
+
+            <div className="mt-2 flex flex-wrap items-center gap-2">
+              <span className="text-sm font-medium text-gray-700">オーバーレイ</span>
+              <button
+                type="button"
+                onClick={toggleMental}
+                aria-pressed={mentalOn}
+                className={`inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-sm ${
+                  mentalOn
+                    ? "border-gray-900 bg-gray-900 text-white"
+                    : "border-gray-300 text-gray-700 hover:bg-gray-50"
+                }`}
+              >
+                <span
+                  className="inline-block h-2.5 w-2.5 rounded-full"
+                  style={{ backgroundColor: mentalOn ? MENTAL_COLOR : "#d1d5db" }}
+                />
+                🧠 メンタル状態
+              </button>
+              <span className="text-xs text-gray-400">
+                0=中央 / +10=上 / -10=下（薬剤の濃度とは独立）
+              </span>
             </div>
 
             <div className="mt-3 grid grid-cols-2 gap-3 sm:grid-cols-5">
@@ -602,6 +668,15 @@ export default function Graph({ loaderData }: Route.ComponentProps) {
                       <span className="font-bold tabular-nums">{r.v.toFixed(2)}</span>
                     </span>
                   ))}
+                  {mentalOn && (
+                    <span className="inline-flex items-center gap-1.5">
+                      <span
+                        className="inline-block h-2.5 w-4 rounded-full"
+                        style={{ backgroundColor: MENTAL_COLOR }}
+                      />
+                      <span className="text-gray-700">🧠 メンタル</span>
+                    </span>
+                  )}
                 </div>
                 <div className="relative">
                 <svg
@@ -648,6 +723,40 @@ export default function Graph({ loaderData }: Route.ComponentProps) {
                     </g>
                   ))}
 
+                  {/* mental overlay axis: fixed -10..10 gridlines (0 centered) */}
+                  {mentalOn && (
+                    <g>
+                      {MENTAL_TICKS.map((s) => (
+                        <line
+                          key={s}
+                          x1={ML}
+                          y1={mentalY(s)}
+                          x2={W - MR}
+                          y2={mentalY(s)}
+                          stroke={s === 0 ? "#f472b6" : "#fbcfe8"}
+                          strokeWidth="1"
+                          strokeDasharray={s === 0 ? "5 4" : "2 4"}
+                        />
+                      ))}
+                      {[10, 0, -10].map((s) => (
+                        <text
+                          key={s}
+                          x={W - MR}
+                          y={mentalY(s) + (s === 10 ? 10 : s === -10 ? -3 : 3)}
+                          textAnchor="end"
+                          fontSize="9"
+                          fontWeight={600}
+                          fill={MENTAL_COLOR}
+                          stroke="#fff"
+                          strokeWidth="2.5"
+                          style={{ paintOrder: "stroke" }}
+                        >
+                          {s > 0 ? `+${s}` : s}
+                        </text>
+                      ))}
+                    </g>
+                  )}
+
                   {/* reference (center) line */}
                   <line
                     x1={centerX}
@@ -673,6 +782,18 @@ export default function Graph({ loaderData }: Route.ComponentProps) {
                     <path key={l.name} d={l.d} fill="none" stroke={l.color} strokeWidth="1.5" />
                   ))}
 
+                  {/* mental trend line (own -10..10 axis, drug-independent) */}
+                  {chart.mentalLine && (
+                    <path
+                      d={chart.mentalLine}
+                      fill="none"
+                      stroke={MENTAL_COLOR}
+                      strokeWidth="1.75"
+                      strokeLinejoin="round"
+                      strokeLinecap="round"
+                    />
+                  )}
+
                   {/* actual "now" line (anchored to real time, slides while panning) */}
                   {nowX != null && (
                     <g>
@@ -695,7 +816,12 @@ export default function Graph({ loaderData }: Route.ComponentProps) {
                       hit circle makes them easy to tap on touch screens. */}
                   {chart.markers.map((m) => {
                     const active = activeMarker === m.key;
-                    const color = m.kind === "dose" ? m.color : COMMENT_COLOR;
+                    const color =
+                      m.kind === "dose"
+                        ? m.color
+                        : m.kind === "mental"
+                          ? MENTAL_COLOR
+                          : COMMENT_COLOR;
                     return (
                       <g key={m.key}>
                         <circle
@@ -770,7 +896,7 @@ export default function Graph({ loaderData }: Route.ComponentProps) {
                             <div className="mt-0.5 break-words text-gray-300">{m.dose.note}</div>
                           )}
                         </>
-                      ) : (
+                      ) : m.kind === "comment" ? (
                         <>
                           <div className="font-semibold">💬 コメント</div>
                           <div className="mt-0.5 text-gray-300 tabular-nums">
@@ -793,13 +919,32 @@ export default function Graph({ loaderData }: Route.ComponentProps) {
                             ))}
                           </div>
                         </>
+                      ) : (
+                        <>
+                          <div className="font-semibold">🧠 メンタル</div>
+                          <div className="mt-0.5 text-gray-300 tabular-nums">
+                            {formatTaken(m.mental.recorded_at)}
+                            {m.mental.recorded_error_min != null &&
+                              ` ±${m.mental.recorded_error_min}m`}
+                          </div>
+                          <div className="mt-1 text-lg font-bold tabular-nums">
+                            スコア{" "}
+                            {m.mental.score > 0
+                              ? `+${m.mental.score}`
+                              : m.mental.score}
+                            <span className="ml-1 text-xs font-normal text-gray-400">
+                              / 10
+                            </span>
+                          </div>
+                        </>
                       )}
                     </div>
                   );
                 })()}
                 </div>
                 <p className="mt-1 text-center text-xs text-gray-400">
-                  グラフを左右にドラッグ / スワイプで基準時刻を移動。点（服用 / 💬コメント）をタップで詳細
+                  グラフを左右にドラッグ / スワイプで基準時刻を移動。点（服用 / 💬コメント
+                  {mentalOn && " / 🧠メンタル"}）をタップで詳細
                 </p>
               </>
             )}

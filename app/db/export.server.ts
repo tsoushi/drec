@@ -1,7 +1,9 @@
 import { db } from "./db.server";
 import type { Rec } from "./records.server";
+import type { Mental } from "./mentals.server";
 import {
   buildMentions,
+  mentalIdsOf,
   recordIdsOf,
   type Comment,
   type MentionRef,
@@ -14,25 +16,33 @@ import { nowLocalISO } from "../lib/time";
 type CommentRow = Omit<Comment, "mentions"> & {
   record_mention_ids: string | null;
   comment_mention_ids: string | null;
+  mental_mention_ids: string | null;
 };
 
 const allRecordsStmt = db.prepare(`SELECT * FROM records ORDER BY id`);
+const allMentalsStmt = db.prepare(`SELECT * FROM mental_states ORDER BY id`);
 const allCommentsStmt = db.prepare(
   `SELECT c.*,
           (SELECT group_concat(record_id) FROM comment_mentions
             WHERE comment_id = c.id) AS record_mention_ids,
           (SELECT group_concat(target_comment_id) FROM comment_comment_mentions
-            WHERE comment_id = c.id) AS comment_mention_ids
+            WHERE comment_id = c.id) AS comment_mention_ids,
+          (SELECT group_concat(target_mental_id) FROM comment_mental_mentions
+            WHERE comment_id = c.id) AS mental_mention_ids
      FROM comments c
     ORDER BY c.id`,
 );
 
 function allComments(): Comment[] {
   return (allCommentsStmt.all() as CommentRow[]).map((r) => {
-    const { record_mention_ids, comment_mention_ids, ...rest } = r;
+    const { record_mention_ids, comment_mention_ids, mental_mention_ids, ...rest } = r;
     return {
       ...rest,
-      mentions: buildMentions(record_mention_ids, comment_mention_ids),
+      mentions: buildMentions(
+        record_mention_ids,
+        comment_mention_ids,
+        mental_mention_ids,
+      ),
     };
   });
 }
@@ -52,6 +62,10 @@ export function getExportCounts() {
     comments: one(`SELECT COUNT(*) n FROM comments WHERE deleted_at IS NULL`),
     commentsDeleted: one(
       `SELECT COUNT(*) n FROM comments WHERE deleted_at IS NOT NULL`,
+    ),
+    mentals: one(`SELECT COUNT(*) n FROM mental_states WHERE deleted_at IS NULL`),
+    mentalsDeleted: one(
+      `SELECT COUNT(*) n FROM mental_states WHERE deleted_at IS NOT NULL`,
     ),
   };
 }
@@ -110,6 +124,7 @@ export function exportCommentsCSV(): string {
       "commented_error_min",
       "mention_record_ids",
       "mention_comment_ids",
+      "mention_mental_ids",
       "created_at",
       "updated_at",
       "deleted_at",
@@ -121,9 +136,34 @@ export function exportCommentsCSV(): string {
       c.commented_error_min,
       recordIdsOf(c.mentions).join(";"),
       commentIdsOf(c.mentions).join(";"),
+      mentalIdsOf(c.mentions).join(";"),
       c.created_at,
       c.updated_at,
       c.deleted_at,
+    ]),
+  ]);
+}
+
+export function exportMentalStatesCSV(): string {
+  const rows = allMentalsStmt.all() as Mental[];
+  return csv([
+    [
+      "id",
+      "score",
+      "recorded_at",
+      "recorded_error_min",
+      "created_at",
+      "updated_at",
+      "deleted_at",
+    ],
+    ...rows.map((m) => [
+      m.id,
+      m.score,
+      m.recorded_at,
+      m.recorded_error_min,
+      m.created_at,
+      m.updated_at,
+      m.deleted_at,
     ]),
   ]);
 }
@@ -135,6 +175,7 @@ export function exportJSON(): string {
       exported_at: nowLocalISO(),
       records: allRecordsStmt.all(),
       comments: allComments(),
+      mentals: allMentalsStmt.all(),
     },
     null,
     2,
