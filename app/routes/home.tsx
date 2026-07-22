@@ -541,15 +541,41 @@ export default function Home({ loaderData }: Route.ComponentProps) {
     });
   }
 
-  // Dismiss the highlight on the next tap anywhere. The effect attaches only
-  // after the tap that created the highlight has been dispatched, and listens
-  // on pointerdown (which always precedes the click/long-press that set it), so
-  // the initiating gesture never clears its own highlight.
+  // Dismiss the highlight on the next explicit tap anywhere — but not on a
+  // scroll. We measure the pointer's travel between down and up and only clear
+  // when it barely moved; a scroll drag (large travel) or a touch-scroll
+  // (pointercancel) leaves the highlight in place. The effect attaches after
+  // the gesture that set the highlight, and `tracking` stays false for a
+  // pointer already pressed when the highlight appeared (e.g. a long-press),
+  // so the initiating gesture never clears its own highlight.
   useEffect(() => {
     if (highlights.length === 0) return;
-    const clear = () => setHighlights([]);
-    document.addEventListener("pointerdown", clear);
-    return () => document.removeEventListener("pointerdown", clear);
+    let startX = 0;
+    let startY = 0;
+    let tracking = false;
+    const onDown = (e: PointerEvent) => {
+      tracking = true;
+      startX = e.clientX;
+      startY = e.clientY;
+    };
+    const onUp = (e: PointerEvent) => {
+      if (!tracking) return;
+      tracking = false;
+      if (Math.hypot(e.clientX - startX, e.clientY - startY) <= 10) {
+        setHighlights([]);
+      }
+    };
+    const onCancel = () => {
+      tracking = false;
+    };
+    document.addEventListener("pointerdown", onDown);
+    document.addEventListener("pointerup", onUp);
+    document.addEventListener("pointercancel", onCancel);
+    return () => {
+      document.removeEventListener("pointerdown", onDown);
+      document.removeEventListener("pointerup", onUp);
+      document.removeEventListener("pointercancel", onCancel);
+    };
   }, [highlights]);
 
   function highlightItem(ref: MentionRef) {
