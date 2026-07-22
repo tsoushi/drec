@@ -293,7 +293,6 @@ export default function Home({ loaderData }: Route.ComponentProps) {
   const drugRef = useRef<HTMLInputElement>(null);
   const bodyRef = useRef<HTMLTextAreaElement>(null);
   const busyRef = useRef(false);
-  const highlightTokenRef = useRef(0);
 
   const recordsById = useMemo(() => {
     const m = new Map<number, Rec>();
@@ -524,11 +523,10 @@ export default function Home({ loaderData }: Route.ComponentProps) {
   }
 
   // Highlight one or more timeline items (tap a mention chip → the single
-  // target; long-press a chip → every mention of that comment). A token guards
-  // against a newer highlight being cleared by an older auto-clear timer.
+  // target; long-press a chip → every mention of that comment). The highlight
+  // stays until the user taps anywhere on the screen (see the effect below).
   function flashHighlights(refs: MentionRef[], scrollTo?: MentionRef) {
     if (refs.length === 0) return;
-    const token = ++highlightTokenRef.current;
     setHighlights(refs);
     const target = scrollTo ?? refs[0];
     const domId =
@@ -541,10 +539,18 @@ export default function Home({ loaderData }: Route.ComponentProps) {
       behavior: "smooth",
       block: "center",
     });
-    window.setTimeout(() => {
-      if (highlightTokenRef.current === token) setHighlights([]);
-    }, 1600);
   }
+
+  // Dismiss the highlight on the next tap anywhere. The effect attaches only
+  // after the tap that created the highlight has been dispatched, and listens
+  // on pointerdown (which always precedes the click/long-press that set it), so
+  // the initiating gesture never clears its own highlight.
+  useEffect(() => {
+    if (highlights.length === 0) return;
+    const clear = () => setHighlights([]);
+    document.addEventListener("pointerdown", clear);
+    return () => document.removeEventListener("pointerdown", clear);
+  }, [highlights]);
 
   function highlightItem(ref: MentionRef) {
     flashHighlights([ref]);
