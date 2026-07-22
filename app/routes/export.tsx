@@ -20,12 +20,17 @@ const items = [
   {
     target: "comments.csv",
     title: "コメント CSV",
-    desc: "コメント全行（メンション先の記録IDは ; 区切り）",
+    desc: "コメント全行（メンション先の 記録/コメント/メンタル ID は ; 区切り）",
+  },
+  {
+    target: "mentals.csv",
+    title: "メンタル CSV",
+    desc: "メンタル記録の全行（列: レベル・時刻・誤差など）",
   },
   {
     target: "all.json",
     title: "全データ JSON",
-    desc: "記録＋コメントをまとめた完全バックアップ",
+    desc: "記録＋コメント＋メンタルをまとめた完全バックアップ",
   },
 ] as const;
 
@@ -41,9 +46,10 @@ export default function Export({ loaderData }: Route.ComponentProps) {
       </header>
 
       <p className="text-sm text-gray-500">
-        現在のデータ: 記録 {c.records}件・コメント {c.comments}件
-        {c.recordsDeleted + c.commentsDeleted > 0 &&
-          `（削除済み 記録${c.recordsDeleted}・コメント${c.commentsDeleted} も含めて出力）`}
+        現在のデータ: 記録 {c.records}件・コメント {c.comments}件・メンタル{" "}
+        {c.mentals}件
+        {c.recordsDeleted + c.commentsDeleted + c.mentalsDeleted > 0 &&
+          `（削除済み 記録${c.recordsDeleted}・コメント${c.commentsDeleted}・メンタル${c.mentalsDeleted} も含めて出力）`}
       </p>
 
       <div className="mt-4 space-y-3">

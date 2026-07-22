@@ -21,6 +21,15 @@ import {
   type MentionRef,
 } from "../db/comments.server";
 import {
+  createMental,
+  listMentals,
+  softDeleteMental,
+  updateMental,
+  type Mental,
+  type MentalInput,
+} from "../db/mentals.server";
+import { MENTAL_MAX, MENTAL_MIN } from "../lib/mental";
+import {
   agoLabel,
   dateKey,
   formatDateHeader,
@@ -41,9 +50,22 @@ import {
 
 const COMMON_UNITS = ["mg", "g", "錠", "mL", "包", "滴", "単位", "回"];
 
-// --- mention-reference helpers (records use "r<id>", comments use "c<id>") ---
+// --- mention-reference helpers (record "r<id>" / comment "c<id>" / mental "m<id>") ---
+const KIND_PREFIX = { record: "r", comment: "c", mental: "m" } as const;
 function refTag(ref: MentionRef): string {
-  return `${ref.kind === "record" ? "r" : "c"}${ref.id}`;
+  return `${KIND_PREFIX[ref.kind]}${ref.id}`;
+}
+/** DOM id of a timeline item, used for mention-jump scrolling + highlight. */
+function refDomId(ref: MentionRef): string {
+  return `${ref.kind === "record" ? "rec" : ref.kind === "comment" ? "cmt" : "mtl"}-${ref.id}`;
+}
+/** Signed mental level as "+3" / "-2" / "0". */
+function mentalLabel(level: number): string {
+  return level > 0 ? `+${level}` : String(level);
+}
+/** Text color for a mental level: positive green, negative red, zero gray. */
+function mentalColor(level: number): string {
+  return level > 0 ? "text-green-600" : level < 0 ? "text-red-600" : "text-gray-500";
 }
 function sameRef(a: MentionRef | null, b: MentionRef | null): boolean {
   return !!a && !!b && a.kind === b.kind && a.id === b.id;
@@ -70,6 +92,7 @@ export async function loader(_: Route.LoaderArgs) {
   return {
     records: listRecords(),
     comments: listComments(),
+    mentals: listMentals(),
     suggestions: getSuggestions(),
   };
 }
@@ -125,18 +148,23 @@ function parseCommentInput(fd: FormData): { input?: CommentInput; error?: string
   const commentedAt = normalizeLocalInput(String(fd.get("taken_at") ?? ""));
   if (!commentedAt) return { error: "コメント時刻が不正です" };
 
-  // Mentions arrive as tagged ids: "r<id>" for records, "c<id>" for comments.
+  // Mentions arrive as tagged ids: "r<id>" record, "c<id>" comment, "m<id>" mental.
+  const KIND_OF: Record<string, MentionRef["kind"]> = {
+    r: "record",
+    c: "comment",
+    m: "mental",
+  };
   const mentions: MentionRef[] = [];
   const seenMentions = new Set<string>();
   for (const raw of String(fd.get("mentions") ?? "").split(",")) {
-    const m = /^([rc])(\d+)$/.exec(raw.trim());
+    const m = /^([rcm])(\d+)$/.exec(raw.trim());
     if (!m) continue;
     const id = Number(m[2]);
     if (!Number.isInteger(id) || id <= 0) continue;
     const key = `${m[1]}${id}`;
     if (seenMentions.has(key)) continue;
     seenMentions.add(key);
-    mentions.push({ kind: m[1] === "r" ? "record" : "comment", id });
+    mentions.push({ kind: KIND_OF[m[1]], id });
   }
 
   const errRaw = String(fd.get("taken_error_min") ?? "").trim();
@@ -150,6 +178,32 @@ function parseCommentInput(fd: FormData): { input?: CommentInput; error?: string
       commented_at: commentedAt,
       commented_error_min: commentedError,
       mentions,
+    },
+  };
+}
+
+function parseMentalInput(fd: FormData): { input?: MentalInput; error?: string } {
+  const levelRaw = String(fd.get("level") ?? "").trim();
+  const levelNum = Number(levelRaw);
+  if (levelRaw === "" || !Number.isFinite(levelNum)) {
+    return { error: "メンタルの値が不正です" };
+  }
+  // Clamp to the allowed range and round to an integer step.
+  const level = Math.max(MENTAL_MIN, Math.min(MENTAL_MAX, Math.round(levelNum)));
+
+  const recordedAt = normalizeLocalInput(String(fd.get("taken_at") ?? ""));
+  if (!recordedAt) return { error: "記録時刻が不正です" };
+
+  const errRaw = String(fd.get("taken_error_min") ?? "").trim();
+  const errNum = errRaw === "" ? null : Number(errRaw);
+  const recordedError =
+    errNum !== null && Number.isFinite(errNum) ? Math.round(Math.abs(errNum)) : null;
+
+  return {
+    input: {
+      level,
+      recorded_at: recordedAt,
+      recorded_error_min: recordedError,
     },
   };
 }
@@ -196,22 +250,41 @@ export async function action({
     return { ok: true };
   }
 
+  // --- mentals ---
+  if (intent === "mental_delete") {
+    if (hasId) softDeleteMental(id);
+    return { ok: true };
+  }
+  if (intent === "mental_create" || intent === "mental_update") {
+    const { input, error } = parseMentalInput(fd);
+    if (!input) return { ok: false, error: error ?? "入力エラー" };
+    if (intent === "mental_update") {
+      if (!hasId) return { ok: false, error: "対象が見つかりません" };
+      updateMental(id, input);
+    } else {
+      createMental(input);
+    }
+    return { ok: true };
+  }
+
   return { ok: false, error: "不明な操作です" };
 }
 
 const inputClass =
   "mt-1 w-full rounded-lg border border-gray-300 px-3 py-2 text-base outline-none focus:border-gray-900";
 
-type Mode = "record" | "comment";
+type Mode = "record" | "comment" | "mental";
 
 export default function Home({ loaderData }: Route.ComponentProps) {
-  const { records, comments, suggestions } = loaderData;
+  const { records, comments, mentals, suggestions } = loaderData;
   const fetcher = useFetcher<ActionResult>();
 
   const [mode, setMode] = useState<Mode>("record");
   const [editing, setEditing] = useState<Rec | null>(null);
   const [copying, setCopying] = useState<Rec | null>(null); // もう一度: コピー元
   const [editingComment, setEditingComment] = useState<Comment | null>(null);
+  const [editingMental, setEditingMental] = useState<Mental | null>(null);
+  const [mentalLevel, setMentalLevel] = useState(0);
   const [takenAt, setTakenAt] = useState("");
   const [manualTime, setManualTime] = useState(false);
   const [manualText, setManualText] = useState("");
@@ -239,18 +312,26 @@ export default function Home({ loaderData }: Route.ComponentProps) {
     return m;
   }, [comments]);
 
-  // Records and comments merged into one newest-first timeline.
+  const mentalsById = useMemo(() => {
+    const m = new Map<number, Mental>();
+    for (const x of mentals) m.set(x.id, x);
+    return m;
+  }, [mentals]);
+
+  // Records, comments and mentals merged into one newest-first timeline.
   const timeline = useMemo(() => {
     const items: Array<
       | { kind: "record"; t: string; key: string; rec: Rec }
       | { kind: "comment"; t: string; key: string; comment: Comment }
+      | { kind: "mental"; t: string; key: string; mental: Mental }
     > = [
       ...records.map((r) => ({ kind: "record" as const, t: r.taken_at, key: `r${r.id}`, rec: r })),
       ...comments.map((c) => ({ kind: "comment" as const, t: c.commented_at, key: `c${c.id}`, comment: c })),
+      ...mentals.map((x) => ({ kind: "mental" as const, t: x.recorded_at, key: `m${x.id}`, mental: x })),
     ];
     items.sort((a, b) => (a.t < b.t ? 1 : a.t > b.t ? -1 : 0));
     return items;
-  }, [records, comments]);
+  }, [records, comments, mentals]);
 
   // Initialise the time field to "now" on the client (avoids SSR/CSR mismatch).
   useEffect(() => {
@@ -311,6 +392,8 @@ export default function Home({ loaderData }: Route.ComponentProps) {
     setEditing(null);
     setCopying(null);
     setEditingComment(null);
+    setEditingMental(null);
+    setMentalLevel(0);
     setCommentMentions([]);
     setTakenError("");
     setTakenAt(nowLocalInputValue());
@@ -339,12 +422,19 @@ export default function Home({ loaderData }: Route.ComponentProps) {
     resetForm();
   }
 
+  /** Clear every "editing/copying" selection (shared by the start* helpers). */
+  function clearSelections() {
+    setEditing(null);
+    setCopying(null);
+    setEditingComment(null);
+    setEditingMental(null);
+  }
+
   /** もう一度: open a fresh create form pre-filled from the given record. */
   function startCopy(r: Rec) {
     setMode("record");
-    setEditing(null);
+    clearSelections();
     setCopying(r);
-    setEditingComment(null);
     setCommentMentions([]);
     setTakenAt(nowLocalInputValue());
     setManualText(nowLocalSlash());
@@ -355,9 +445,8 @@ export default function Home({ loaderData }: Route.ComponentProps) {
 
   function startEdit(r: Rec) {
     setMode("record");
+    clearSelections();
     setEditing(r);
-    setCopying(null);
-    setEditingComment(null);
     setCommentMentions([]);
     setTakenAt(r.taken_at.slice(0, 16));
     setManualText(isoToSlash(r.taken_at));
@@ -368,8 +457,8 @@ export default function Home({ loaderData }: Route.ComponentProps) {
 
   function startEditComment(c: Comment) {
     setMode("comment");
+    clearSelections();
     setEditingComment(c);
-    setEditing(null);
     setCommentMentions(c.mentions);
     setTakenAt(c.commented_at.slice(0, 16));
     setManualText(isoToSlash(c.commented_at));
@@ -380,12 +469,25 @@ export default function Home({ loaderData }: Route.ComponentProps) {
     window.scrollTo({ top: 0, behavior: "smooth" });
   }
 
+  function startEditMental(x: Mental) {
+    setMode("mental");
+    clearSelections();
+    setEditingMental(x);
+    setMentalLevel(x.level);
+    setCommentMentions([]);
+    setTakenAt(x.recorded_at.slice(0, 16));
+    setManualText(isoToSlash(x.recorded_at));
+    setTakenError(
+      x.recorded_error_min != null ? String(x.recorded_error_min) : "",
+    );
+    setFormKey((k) => k + 1);
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  }
+
   /** Open a fresh comment form seeded with a single mention (from record mode). */
   function startCommentWith(ref: MentionRef) {
     setMode("comment");
-    setEditing(null);
-    setCopying(null);
-    setEditingComment(null);
+    clearSelections();
     setCommentMentions([ref]);
     setTakenError("");
     setNow();
@@ -412,6 +514,12 @@ export default function Home({ loaderData }: Route.ComponentProps) {
     }
   }
 
+  function commentOnMental(x: Mental) {
+    const ref: MentionRef = { kind: "mental", id: x.id };
+    if (mode === "comment") setCommentMentions((cur) => toggleRef(cur, ref));
+    else startCommentWith(ref);
+  }
+
   function removeMention(ref: MentionRef) {
     setCommentMentions((cur) =>
       cur.filter((x) => !(x.kind === ref.kind && x.id === ref.id)),
@@ -420,8 +528,7 @@ export default function Home({ loaderData }: Route.ComponentProps) {
 
   function highlightItem(ref: MentionRef) {
     setHighlight(ref);
-    const domId = ref.kind === "record" ? `rec-${ref.id}` : `cmt-${ref.id}`;
-    document.getElementById(domId)?.scrollIntoView({
+    document.getElementById(refDomId(ref))?.scrollIntoView({
       behavior: "smooth",
       block: "center",
     });
@@ -434,7 +541,8 @@ export default function Home({ loaderData }: Route.ComponentProps) {
   const units = Array.from(new Set([...COMMON_UNITS, ...suggestions.units]));
   const submitting = fetcher.state !== "idle";
   const errorMsg = fetcher.data && !fetcher.data.ok ? fetcher.data.error : null;
-  const isEditing = editing !== null || editingComment !== null;
+  const isEditing =
+    editing !== null || editingComment !== null || editingMental !== null;
   // Field defaults come from the record being edited, or the copy source (もう一度).
   const seed = editing ?? copying;
   const intentValue =
@@ -442,18 +550,31 @@ export default function Home({ loaderData }: Route.ComponentProps) {
       ? editing
         ? "update"
         : "create"
-      : editingComment
-        ? "comment_update"
-        : "comment_create";
-  const editId = mode === "record" ? editing?.id : editingComment?.id;
+      : mode === "comment"
+        ? editingComment
+          ? "comment_update"
+          : "comment_create"
+        : editingMental
+          ? "mental_update"
+          : "mental_create";
+  const editId =
+    mode === "record"
+      ? editing?.id
+      : mode === "comment"
+        ? editingComment?.id
+        : editingMental?.id;
   const submitLabel =
     mode === "record"
       ? editing
         ? "更新する"
         : "記録する"
-      : editingComment
-        ? "更新する"
-        : "コメントする";
+      : mode === "comment"
+        ? editingComment
+          ? "更新する"
+          : "コメントする"
+        : editingMental
+          ? "更新する"
+          : "記録する";
 
   return (
     <main className="mx-auto max-w-xl px-4 pb-24">
@@ -556,7 +677,7 @@ export default function Home({ loaderData }: Route.ComponentProps) {
 
         {!isEditing && (
           <div className="mb-3 inline-flex rounded-lg border border-gray-300 p-0.5">
-            {(["record", "comment"] as const).map((m) => (
+            {(["record", "comment", "mental"] as const).map((m) => (
               <button
                 key={m}
                 type="button"
@@ -565,7 +686,7 @@ export default function Home({ loaderData }: Route.ComponentProps) {
                   mode === m ? "bg-gray-900 text-white" : "text-gray-600"
                 }`}
               >
-                {m === "record" ? "記録" : "コメント"}
+                {m === "record" ? "記録" : m === "comment" ? "コメント" : "メンタル"}
               </button>
             ))}
           </div>
@@ -663,7 +784,7 @@ export default function Home({ loaderData }: Route.ComponentProps) {
               />
             </label>
           </>
-        ) : (
+        ) : mode === "comment" ? (
           <>
             <input
               type="hidden"
@@ -723,6 +844,37 @@ export default function Home({ loaderData }: Route.ComponentProps) {
                         </span>
                       );
                     }
+                    if (ref.kind === "mental") {
+                      const mx = mentalsById.get(ref.id);
+                      return (
+                        <span
+                          key={refTag(ref)}
+                          className="inline-flex items-center gap-1 rounded-full bg-violet-50 px-2.5 py-1 text-xs text-gray-700 ring-1 ring-violet-200"
+                        >
+                          🧠
+                          {mx ? (
+                            <span className={`font-bold ${mentalColor(mx.level)}`}>
+                              {mentalLabel(mx.level)}
+                            </span>
+                          ) : (
+                            `メンタル #${ref.id}`
+                          )}
+                          {mx && (
+                            <span className="text-gray-400">
+                              {formatTaken(mx.recorded_at)}
+                            </span>
+                          )}
+                          <button
+                            type="button"
+                            onClick={() => removeMention(ref)}
+                            className="ml-0.5 text-gray-400 hover:text-gray-700"
+                            aria-label="メンションを外す"
+                          >
+                            ×
+                          </button>
+                        </span>
+                      );
+                    }
                     const tc = commentsById.get(ref.id);
                     return (
                       <span
@@ -752,6 +904,49 @@ export default function Home({ loaderData }: Route.ComponentProps) {
 
             <TimeField
               label="コメント時刻 *"
+              manualTime={manualTime}
+              manualText={manualText}
+              takenAt={takenAt}
+              onToggleManual={toggleManual}
+              onManualText={setManualText}
+              onTakenAt={setTakenAt}
+              onNow={setNow}
+            />
+
+            <ErrorField value={takenError} onChange={setTakenError} />
+          </>
+        ) : (
+          <>
+            <input type="hidden" name="level" value={mentalLevel} />
+            <div className="block">
+              <div className="flex items-baseline justify-between">
+                <span className="text-sm font-medium text-gray-700">
+                  メンタル（{MENTAL_MIN}〜{MENTAL_MAX}）
+                </span>
+                <span
+                  className={`text-3xl font-bold tabular-nums ${mentalColor(mentalLevel)}`}
+                >
+                  {mentalLabel(mentalLevel)}
+                </span>
+              </div>
+              <input
+                type="range"
+                min={MENTAL_MIN}
+                max={MENTAL_MAX}
+                step={1}
+                value={mentalLevel}
+                onChange={(e) => setMentalLevel(Number(e.target.value))}
+                className="mt-2 w-full accent-gray-900"
+              />
+              <div className="mt-0.5 flex justify-between text-xs text-gray-400">
+                <span>{MENTAL_MIN}（悪い）</span>
+                <span>0</span>
+                <span>+{MENTAL_MAX}（良い）</span>
+              </div>
+            </div>
+
+            <TimeField
+              label="記録時刻 *"
               manualTime={manualTime}
               manualText={manualText}
               takenAt={takenAt}
@@ -838,7 +1033,7 @@ export default function Home({ loaderData }: Route.ComponentProps) {
                       onCopy={startCopy}
                       onComment={commentOnRecord}
                     />
-                  ) : (
+                  ) : item.kind === "comment" ? (
                     <CommentRow
                       c={item.comment}
                       editing={editingComment?.id === item.comment.id}
@@ -856,10 +1051,30 @@ export default function Home({ loaderData }: Route.ComponentProps) {
                       })}
                       recordsById={recordsById}
                       commentsById={commentsById}
+                      mentalsById={mentalsById}
                       nowMs={nowMs}
                       onEdit={startEditComment}
                       onComment={commentOnComment}
                       onMentionClick={highlightItem}
+                    />
+                  ) : (
+                    <MentalRow
+                      m={item.mental}
+                      editing={editingMental?.id === item.mental.id}
+                      mentioned={
+                        mode === "comment" &&
+                        hasRef(commentMentions, {
+                          kind: "mental",
+                          id: item.mental.id,
+                        })
+                      }
+                      highlighted={sameRef(highlight, {
+                        kind: "mental",
+                        id: item.mental.id,
+                      })}
+                      nowMs={nowMs}
+                      onEdit={startEditMental}
+                      onComment={commentOnMental}
                     />
                   )}
                 </Fragment>
@@ -1116,6 +1331,7 @@ function CommentRow({
   highlighted,
   recordsById,
   commentsById,
+  mentalsById,
   nowMs,
   onEdit,
   onComment,
@@ -1127,6 +1343,7 @@ function CommentRow({
   highlighted: boolean;
   recordsById: Map<number, Rec>;
   commentsById: Map<number, Comment>;
+  mentalsById: Map<number, Mental>;
   nowMs: number | null;
   onEdit: (c: Comment) => void;
   onComment: (c: Comment) => void;
@@ -1196,6 +1413,36 @@ function CommentRow({
                       {rec && (
                         <span className="font-semibold text-amber-700">
                           {mentionDiffLabel(c.commented_at, rec.taken_at)}
+                        </span>
+                      )}
+                    </button>
+                  );
+                }
+                if (ref.kind === "mental") {
+                  const mx = mentalsById.get(ref.id);
+                  return (
+                    <button
+                      key={refTag(ref)}
+                      type="button"
+                      onClick={() => onMentionClick(ref)}
+                      className="inline-flex items-center gap-1 rounded-full bg-white px-2.5 py-1 text-xs text-gray-700 ring-1 ring-violet-200 hover:bg-violet-50"
+                    >
+                      🧠
+                      {mx ? (
+                        <span className={`font-bold ${mentalColor(mx.level)}`}>
+                          {mentalLabel(mx.level)}
+                        </span>
+                      ) : (
+                        `メンタル #${ref.id}`
+                      )}
+                      {mx && (
+                        <span className="text-gray-400">
+                          {formatTaken(mx.recorded_at)}
+                        </span>
+                      )}
+                      {mx && (
+                        <span className="font-semibold text-amber-700">
+                          {mentionDiffLabel(c.commented_at, mx.recorded_at)}
                         </span>
                       )}
                     </button>
@@ -1274,6 +1521,117 @@ function CommentRow({
               </button>
             </div>
           )}
+        </div>
+      </div>
+    </li>
+  );
+}
+
+function MentalRow({
+  m,
+  editing,
+  mentioned,
+  highlighted,
+  nowMs,
+  onEdit,
+  onComment,
+}: {
+  m: Mental;
+  editing: boolean;
+  mentioned: boolean;
+  highlighted: boolean;
+  nowMs: number | null;
+  onEdit: (m: Mental) => void;
+  onComment: (m: Mental) => void;
+}) {
+  const del = useFetcher();
+  const [confirming, setConfirming] = useState(false);
+  const busy = del.state !== "idle";
+  const ago = nowMs != null ? agoLabel(m.recorded_at, nowMs) : null;
+
+  function remove() {
+    setConfirming(false);
+    del.submit({ intent: "mental_delete", id: String(m.id) }, { method: "post" });
+  }
+
+  return (
+    <li
+      id={`mtl-${m.id}`}
+      className={`scroll-mt-4 rounded-xl border bg-violet-50 p-3 shadow-sm transition ${
+        editing
+          ? "border-gray-900"
+          : mentioned
+            ? "border-blue-500 ring-2 ring-blue-200"
+            : highlighted
+              ? "border-amber-400 ring-2 ring-amber-300"
+              : "border-violet-200"
+      } ${busy ? "opacity-40" : ""}`}
+    >
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <div className="flex items-center gap-1.5 text-xs font-medium text-violet-700">
+            <span>🧠 メンタル</span>
+            <span className="text-gray-400">
+              {formatTaken(m.recorded_at)}
+              {m.recorded_error_min != null && ` ±${m.recorded_error_min}m`}
+              {ago && <span className="ml-2">{ago}</span>}
+            </span>
+          </div>
+          <div className="mt-0.5 flex items-baseline gap-2">
+            <span className={`text-2xl font-bold tabular-nums ${mentalColor(m.level)}`}>
+              {mentalLabel(m.level)}
+            </span>
+            <span className="text-xs text-gray-400">/ {MENTAL_MIN}〜{MENTAL_MAX}</span>
+          </div>
+        </div>
+
+        <div className="flex shrink-0 flex-col items-end gap-1">
+          <button
+            type="button"
+            onClick={() => onComment(m)}
+            className={`rounded-md px-2 py-1 text-xs font-medium ${
+              mentioned
+                ? "bg-blue-500 text-white"
+                : "text-gray-700 hover:bg-violet-100"
+            }`}
+          >
+            {mentioned ? "参照中" : "コメント"}
+          </button>
+          <div className="flex gap-1">
+            <button
+              type="button"
+              onClick={() => onEdit(m)}
+              className="rounded-md px-2 py-1 text-xs font-medium text-gray-700 hover:bg-violet-100"
+            >
+              編集
+            </button>
+            {!confirming ? (
+              <button
+                type="button"
+                onClick={() => setConfirming(true)}
+                className="rounded-md px-2 py-1 text-xs font-medium text-gray-500 hover:bg-violet-100"
+              >
+                削除
+              </button>
+            ) : (
+              <>
+                <button
+                  type="button"
+                  onClick={remove}
+                  className="rounded-md bg-red-600 px-2 py-1 text-xs font-medium text-white"
+                >
+                  削除する
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setConfirming(false)}
+                  className="rounded-md px-2 py-1 text-xs font-medium text-gray-500 hover:bg-violet-100"
+                >
+                  やめる
+                </button>
+              </>
+            )}
+          </div>
         </div>
       </div>
     </li>

@@ -32,6 +32,14 @@ export type GraphComment = {
   commented_error_min: number | null;
 };
 
+/** Active mental-state logs, shown as an absolute-scale line on the graph. */
+export type GraphMental = {
+  id: number;
+  level: number;
+  recorded_at: string;
+  recorded_error_min: number | null;
+};
+
 const drugsStmt = db.prepare(
   `SELECT drug_name AS name, COUNT(*) AS count, MAX(taken_at) AS last_taken_at
      FROM records
@@ -53,6 +61,13 @@ const commentsStmt = db.prepare(
      FROM comments
     WHERE deleted_at IS NULL
     ORDER BY commented_at`,
+);
+
+const mentalsStmt = db.prepare(
+  `SELECT id, level, recorded_at, recorded_error_min
+     FROM mentals
+    WHERE deleted_at IS NULL
+    ORDER BY recorded_at`,
 );
 
 export type GraphSettings = {
@@ -81,6 +96,7 @@ export function getGraphData(): {
   drugs: GraphDrug[];
   doses: GraphDose[];
   comments: GraphComment[];
+  mentals: GraphMental[];
   settings: Record<string, GraphSettings>;
 } {
   const settings: Record<string, GraphSettings> = {};
@@ -92,6 +108,7 @@ export function getGraphData(): {
     drugs: drugsStmt.all() as GraphDrug[],
     doses: dosesStmt.all() as GraphDose[],
     comments: commentsStmt.all() as GraphComment[],
+    mentals: mentalsStmt.all() as GraphMental[],
     settings,
   };
 }

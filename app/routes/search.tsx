@@ -205,6 +205,16 @@ export default function Search({ loaderData }: Route.ComponentProps) {
                                 </span>
                               );
                             }
+                            if (ref.kind === "mental") {
+                              return (
+                                <span
+                                  key={`m${ref.id}`}
+                                  className="inline-flex items-center gap-1 rounded-full bg-white px-2 py-0.5 text-xs text-gray-600 ring-1 ring-violet-200"
+                                >
+                                  🧠 メンタル
+                                </span>
+                              );
+                            }
                             const tc = commentsById.get(ref.id);
                             return (
                               <span

@@ -19,6 +19,7 @@ const OP_LABEL: Record<string, string> = {
 const ENTITY_LABEL: Record<string, string> = {
   record: "記録",
   comment: "コメント",
+  mental: "メンタル",
 };
 
 function opClass(op: string): string {

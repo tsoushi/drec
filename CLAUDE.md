@@ -28,17 +28,18 @@ npm run start      # 本番サーバ → http://localhost:3000
 
 メイン画面は `app/routes/home.tsx`（loader / action / UI がすべて入っている）。補助画面は読み取り専用で `/logs`（変更ログ閲覧）、`/report`（月別の薬剤別 回数・合計量レポート。`report.server.ts`）、`/graph`（血中濃度の簡易グラフ。専用の `graph.server.ts` を持ち、モデル計算・SVG 描画・ドラッグ操作はクライアント側。パラメータは薬剤ごとに `graph_settings` テーブルへ action 経由でデバウンス保存 — 表示設定なので例外的に `logChange` を通さない。`shouldRevalidate` で設定保存の再検証を抑止。複数薬剤を同時選択でき（`?drug=` を複数保持）、各薬剤は自身の設定で別色の線として重ね描き（合算しない。パラメータ編集は「編集対象」で選んだ1薬剤）。曲線上に服用（薬剤色）とコメント（青）の点を描き、押下でポップオーバー詳細 — コメントを効果予測に照らして分析する用途）。
 
-- **action は formData の `intent` で分岐**: `create` / `update` / `delete`（記録）、`comment_create` / `comment_update` / `comment_delete`（コメント）。成功で `{ ok: true }` → useFetcher の revalidation で一覧更新。
+- **action は formData の `intent` で分岐**: `create` / `update` / `delete`（記録）、`comment_create` / `comment_update` / `comment_delete`（コメント）、`mental_create` / `mental_update` / `mental_delete`（メンタル）。成功で `{ ok: true }` → useFetcher の revalidation で一覧更新。
 - **DB 層** (`app/db/`): `*.server.ts` 命名必須（better-sqlite3 をクライアントバンドルに混入させない。`vite.config.ts` の `ssr.external` にも指定済み）。
-  - `db.server.ts` — 接続シングルトン（HMR 対策で `globalThis.__drecDb` にキャッシュ）＋ **`PRAGMA user_version` ベースのマイグレーション**。スキーマ変更は `MIGRATIONS` 配列に関数を 1 つ追記するだけ（現在 v7）。
-  - `records.server.ts` / `comments.server.ts` — prepared statement による型付き CRUD。コメントは `comment_mentions`（多対多）で 0..N 件の記録を参照。
-  - `log.server.ts` — **記録・コメントの DB 変更（create/update/delete）は `logChange` を必ず通す**。コンソール＋ `changes.log` に追記され、`/logs`（`app/routes/logs.tsx`）で閲覧できる。新しい書き込み経路を作るときも必須（例外: `graph_settings` などの表示設定はログ対象外）。
-- **タイムライン**: 記録（`taken_at`）とコメント（`commented_at`）をクライアントでマージして新しい順に表示。
+  - `db.server.ts` — 接続シングルトン（HMR 対策で `globalThis.__drecDb` にキャッシュ）＋ **`PRAGMA user_version` ベースのマイグレーション**。スキーマ変更は `MIGRATIONS` 配列に関数を 1 つ追記するだけ（現在 v10）。
+  - `records.server.ts` / `comments.server.ts` / `mentals.server.ts` — prepared statement による型付き CRUD。**メンタル**は -10〜10 の自己申告値（`mentals` テーブル、記録日時＋誤差）。コメントは 0..N 件を **メンション** でき、対象は記録 / コメント / メンタルの3種（それぞれ `comment_mentions` / `comment_comment_mentions` / `comment_mental_mentions` の多対多）。メンションは `MentionRef = {kind:"record"|"comment"|"mental", id}` として全読み取り経路（home/notes/search/calendar/export）で `buildMentions` により統一デコード。クライアントのタグ表現は `r<id>`/`c<id>`/`m<id>`。
+  - `log.server.ts` — **記録・コメント・メンタルの DB 変更（create/update/delete）は `logChange` を必ず通す**。コンソール＋ `changes.log` に追記され、`/logs`（`app/routes/logs.tsx`）で閲覧できる。新しい書き込み経路を作るときも必須（例外: `graph_settings` などの表示設定はログ対象外）。
+- **タイムライン**: 記録（`taken_at`）・コメント（`commented_at`）・メンタル（`recorded_at`）をクライアントでマージして新しい順に表示。
+- **グラフのメンタル表示**: `/graph` は薬剤とは独立した「メンタル」トグル（`?mental=1` で永続）を持ち、ON で -10〜10 を **絶対目盛り**（0=中央・+10=上・-10=下、薬剤の濃度スケールと無関係）で別色の線＋点として重ね描きする。範囲定数 `MENTAL_MIN`/`MENTAL_MAX` は `app/lib/mental.ts`（クライアントも import するため *.server.ts 外）。
 
 ## 重要な規約
 
 - **時刻はすべてローカル naive ISO `YYYY-MM-DDTHH:mm:ss`**（辞書順＝時系列順）。生成・整形・差分計算は必ず `app/lib/time.ts` のヘルパを使う。`Date.toISOString()` 等の UTC 系 API は使わない。
-- **論理削除**: `deleted_at` に値を入れるだけ（記録・コメント共通）。復元 UI は意図的に作らない（DB 直接操作で行う設計）。
+- **論理削除**: `deleted_at` に値を入れるだけ（記録・コメント・メンタル共通）。復元 UI は意図的に作らない（DB 直接操作で行う設計）。
 - **`created_at` は不変**。update 文で絶対に触らない。
 - **「今」の初期値はクライアント側 `useEffect` でセット**（SSR ハイドレーション不整合の回避）。フォームのリセットは `formKey` の increment（再マウント）で行う。
 - 経過時間表示（`-3d2h30m` 等）は 1 秒 tick の `nowMs` state で更新。誤差は `±Nm` 表記。

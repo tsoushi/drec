@@ -1,6 +1,11 @@
 import { db } from "./db.server";
 import type { Rec } from "./records.server";
-import { buildMentions, recordIdsOf, type Comment } from "./comments.server";
+import {
+  buildMentions,
+  recordIdsOf,
+  MENTION_COLUMNS,
+  type Comment,
+} from "./comments.server";
 
 // Read-only queries for the /notes screen: page through "days that have
 // content" (records or comments), newest first, and return everything in that
@@ -33,11 +38,7 @@ const recordsSinceStmt = db.prepare(
 );
 
 const commentsSinceStmt = db.prepare(
-  `SELECT c.*,
-          (SELECT group_concat(record_id) FROM comment_mentions
-            WHERE comment_id = c.id) AS record_mention_ids,
-          (SELECT group_concat(target_comment_id) FROM comment_comment_mentions
-            WHERE comment_id = c.id) AS comment_mention_ids
+  `SELECT c.*,${MENTION_COLUMNS}
      FROM comments c
     WHERE c.deleted_at IS NULL AND c.commented_at >= ?
     ORDER BY c.commented_at, c.id`,
@@ -46,13 +47,18 @@ const commentsSinceStmt = db.prepare(
 type CommentRow = Omit<Comment, "mentions"> & {
   record_mention_ids: string | null;
   comment_mention_ids: string | null;
+  mental_mention_ids: string | null;
 };
 
 function toComment(r: CommentRow): Comment {
-  const { record_mention_ids, comment_mention_ids, ...rest } = r;
+  const { record_mention_ids, comment_mention_ids, mental_mention_ids, ...rest } = r;
   return {
     ...rest,
-    mentions: buildMentions(record_mention_ids, comment_mention_ids),
+    mentions: buildMentions(
+      record_mention_ids,
+      comment_mention_ids,
+      mental_mention_ids,
+    ),
   };
 }
 

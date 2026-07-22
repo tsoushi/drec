@@ -683,6 +683,18 @@ function NoteCommentRow({
                       </button>
                     );
                   }
+                  if (ref.kind === "mental") {
+                    // The notes screen doesn't load mental data; show a compact
+                    // non-navigating marker (full detail lives on the home screen).
+                    return (
+                      <span
+                        key={`m${ref.id}`}
+                        className="inline-flex items-center gap-1 rounded-full bg-white px-2.5 py-1 text-xs text-gray-500 ring-1 ring-violet-200"
+                      >
+                        🧠 メンタル
+                      </span>
+                    );
+                  }
                   const tc = commentsById.get(ref.id);
                   return (
                     <button

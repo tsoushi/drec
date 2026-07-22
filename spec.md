@@ -74,9 +74,13 @@ DB は `data/drec.db`（WAL モード、`DREC_DB` で変更可）。スキーマ
 
 `body`（本文・必須）、`commented_at`（時刻）、`commented_error_min`（±分）、`created_at` / `updated_at` / `deleted_at`（records と同じ規約）。
 
-### comment_mentions — コメント→記録の参照（多対多）
+### mentals — メンタル記録
 
-`(comment_id, record_id)` の複合 PK。コメントは 0..N 件の記録をメンションできる。
+`level`（INTEGER、-10〜10 の自己申告値）、`recorded_at`（時刻）、`recorded_error_min`（±分）、`created_at` / `updated_at` / `deleted_at`（records と同じ規約）。記録・コメントと同じタイムラインに並び、コメントからメンションでき、血中濃度グラフに絶対目盛りで重ねられる。範囲定数は `app/lib/mental.ts`。
+
+### comment_mentions / comment_comment_mentions / comment_mental_mentions — コメントの参照（多対多）
+
+コメントは 0..N 件を **メンション** でき、対象は記録・コメント・メンタルの3種。それぞれ `(comment_id, record_id)` / `(comment_id, target_comment_id)` / `(comment_id, mental_id)` の複合 PK。クライアントのタグ表現は `r<id>` / `c<id>` / `m<id>`、サーバ型は `MentionRef = {kind, id}`。
 
 ### graph_settings — グラフの薬剤別表示設定
 
@@ -88,9 +92,9 @@ DB は `data/drec.db`（WAL モード、`DREC_DB` で変更可）。スキーマ
 
 - `*.server.ts` 命名を必須とし、better-sqlite3 をクライアントバンドルへ混入させない（`vite.config.ts` の `ssr.external` にも指定）。
 - `db.server.ts` — 接続シングルトン。dev の HMR で接続が増えないよう `globalThis.__drecDb` にキャッシュ。起動時にマイグレーションを適用。
-- `records.server.ts` / `comments.server.ts` — prepared statement による型付き CRUD。一覧は `deleted_at IS NULL` のみ返す。
+- `records.server.ts` / `comments.server.ts` / `mentals.server.ts` — prepared statement による型付き CRUD。一覧は `deleted_at IS NULL` のみ返す。コメントのメンションは全読み取り経路で `buildMentions` により統一デコード。
 - `report.server.ts` / `graph.server.ts` — 各補助画面用の読み取り（graph は設定の upsert のみ書き込み）。
-- `log.server.ts` — 変更ログ。**記録・コメントの create / update / delete は必ず `logChange` を通す**。コンソールと `data/changes.log`（JSON Lines、`DREC_LOG` で変更可）に追記し、`/logs` で閲覧する。新しい書き込み経路を作るときも必須（例外: `graph_settings` などの表示設定）。
+- `log.server.ts` — 変更ログ。**記録・コメント・メンタルの create / update / delete は必ず `logChange` を通す**。コンソールと `data/changes.log`（JSON Lines、`DREC_LOG` で変更可）に追記し、`/logs` で閲覧する。新しい書き込み経路を作るときも必須（例外: `graph_settings` などの表示設定）。
 
 ### action の設計
 
