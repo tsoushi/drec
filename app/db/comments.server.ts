@@ -2,6 +2,11 @@ import { db } from "./db.server";
 import { logChange } from "./log.server";
 import { nowLocalISO } from "../lib/time";
 
+/** A comment can mention 0..N records and/or other comments. */
+export type MentionRef =
+  | { kind: "record"; id: number }
+  | { kind: "comment"; id: number };
+
 export type Comment = {
   id: number;
   body: string;
@@ -10,33 +15,60 @@ export type Comment = {
   created_at: string;
   updated_at: string;
   deleted_at: string | null;
-  mentions: number[]; // referenced record ids
+  mentions: MentionRef[]; // referenced records and/or comments
 };
 
 export type CommentInput = {
   body: string;
   commented_at: string;
   commented_error_min: number | null;
-  mentions: number[];
+  mentions: MentionRef[];
 };
 
-type Row = Omit<Comment, "mentions"> & { mention_ids: string | null };
+type Row = Omit<Comment, "mentions"> & {
+  record_mention_ids: string | null;
+  comment_mention_ids: string | null;
+};
 
 const listStmt = db.prepare(
   `SELECT c.*,
-          (SELECT group_concat(record_id) FROM comment_mentions WHERE comment_id = c.id) AS mention_ids
+          (SELECT group_concat(record_id) FROM comment_mentions
+            WHERE comment_id = c.id) AS record_mention_ids,
+          (SELECT group_concat(target_comment_id) FROM comment_comment_mentions
+            WHERE comment_id = c.id) AS comment_mention_ids
      FROM comments c
     WHERE c.deleted_at IS NULL
     ORDER BY c.commented_at DESC, c.id DESC
     LIMIT ?`,
 );
 
+function idsOf(csv: string | null): number[] {
+  return csv ? csv.split(",").map(Number) : [];
+}
+
+/**
+ * Build a comment's typed mention list from the two group_concat CSV columns.
+ * Shared by every read path (home / notes / search / calendar / export) so they
+ * all decode mentions the same way.
+ */
+export function buildMentions(
+  recordCsv: string | null,
+  commentCsv: string | null,
+): MentionRef[] {
+  return [
+    ...idsOf(recordCsv).map((id) => ({ kind: "record" as const, id })),
+    ...idsOf(commentCsv).map((id) => ({ kind: "comment" as const, id })),
+  ];
+}
+
+/** The referenced record ids among a mention list (comment refs dropped). */
+export function recordIdsOf(mentions: MentionRef[]): number[] {
+  return mentions.filter((m) => m.kind === "record").map((m) => m.id);
+}
+
 function rowToComment(r: Row): Comment {
-  const { mention_ids, ...rest } = r;
-  return {
-    ...rest,
-    mentions: mention_ids ? mention_ids.split(",").map(Number) : [],
-  };
+  const { record_mention_ids, comment_mention_ids, ...rest } = r;
+  return { ...rest, mentions: buildMentions(record_mention_ids, comment_mention_ids) };
 }
 
 export function listComments(limit = 300): Comment[] {
@@ -48,12 +80,34 @@ const insertCommentStmt = db.prepare(
    VALUES (@body, @commented_at, @commented_error_min, @created_at, @updated_at)
    RETURNING *`,
 );
-const insertMentionStmt = db.prepare(
+const insertRecordMentionStmt = db.prepare(
   `INSERT OR IGNORE INTO comment_mentions (comment_id, record_id) VALUES (?, ?)`,
 );
-const deleteMentionsStmt = db.prepare(
+const insertCommentMentionStmt = db.prepare(
+  `INSERT OR IGNORE INTO comment_comment_mentions (comment_id, target_comment_id) VALUES (?, ?)`,
+);
+const deleteRecordMentionsStmt = db.prepare(
   `DELETE FROM comment_mentions WHERE comment_id = ?`,
 );
+const deleteCommentMentionsStmt = db.prepare(
+  `DELETE FROM comment_comment_mentions WHERE comment_id = ?`,
+);
+
+/** Persist the mention set for a comment, de-duped and without self-mention. */
+function writeMentions(commentId: number, mentions: MentionRef[]): MentionRef[] {
+  const seen = new Set<string>();
+  const saved: MentionRef[] = [];
+  for (const ref of mentions) {
+    if (ref.kind === "comment" && ref.id === commentId) continue; // no self-mention
+    const key = `${ref.kind}:${ref.id}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    if (ref.kind === "record") insertRecordMentionStmt.run(commentId, ref.id);
+    else insertCommentMentionStmt.run(commentId, ref.id);
+    saved.push(ref);
+  }
+  return saved;
+}
 
 const createCommentTx = db.transaction((input: CommentInput): Comment => {
   const now = nowLocalISO();
@@ -64,8 +118,8 @@ const createCommentTx = db.transaction((input: CommentInput): Comment => {
     created_at: now,
     updated_at: now,
   }) as Omit<Comment, "mentions">;
-  for (const rid of input.mentions) insertMentionStmt.run(row.id, rid);
-  return { ...row, mentions: input.mentions };
+  const mentions = writeMentions(row.id, input.mentions);
+  return { ...row, mentions };
 });
 
 export function createComment(input: CommentInput): Comment {
@@ -94,9 +148,10 @@ const updateCommentTx = db.transaction(
       updated_at: nowLocalISO(),
     }) as Omit<Comment, "mentions"> | undefined;
     if (!row) return undefined;
-    deleteMentionsStmt.run(id);
-    for (const rid of input.mentions) insertMentionStmt.run(id, rid);
-    return { ...row, mentions: input.mentions };
+    deleteRecordMentionsStmt.run(id);
+    deleteCommentMentionsStmt.run(id);
+    const mentions = writeMentions(id, input.mentions);
+    return { ...row, mentions };
   },
 );
 

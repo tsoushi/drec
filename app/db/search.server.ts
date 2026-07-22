@@ -1,6 +1,6 @@
 import { db } from "./db.server";
 import type { Rec } from "./records.server";
-import type { Comment } from "./comments.server";
+import { buildMentions, recordIdsOf, type Comment } from "./comments.server";
 
 // Read-only LIKE search across records and comments for the /search screen.
 
@@ -23,20 +23,26 @@ const recordsStmt = db.prepare(
 
 const commentsStmt = db.prepare(
   `SELECT c.*,
-          (SELECT group_concat(record_id) FROM comment_mentions WHERE comment_id = c.id) AS mention_ids
+          (SELECT group_concat(record_id) FROM comment_mentions
+            WHERE comment_id = c.id) AS record_mention_ids,
+          (SELECT group_concat(target_comment_id) FROM comment_comment_mentions
+            WHERE comment_id = c.id) AS comment_mention_ids
      FROM comments c
     WHERE c.deleted_at IS NULL AND c.body LIKE @p ESCAPE '\\'
     ORDER BY c.commented_at DESC, c.id DESC
     LIMIT @limit`,
 );
 
-type CommentRow = Omit<Comment, "mentions"> & { mention_ids: string | null };
+type CommentRow = Omit<Comment, "mentions"> & {
+  record_mention_ids: string | null;
+  comment_mention_ids: string | null;
+};
 
 function toComment(r: CommentRow): Comment {
-  const { mention_ids, ...rest } = r;
+  const { record_mention_ids, comment_mention_ids, ...rest } = r;
   return {
     ...rest,
-    mentions: mention_ids ? mention_ids.split(",").map(Number) : [],
+    mentions: buildMentions(record_mention_ids, comment_mention_ids),
   };
 }
 
@@ -49,7 +55,7 @@ export function searchAll(q: string, limit = 100): SearchResult {
 
   const loaded = new Set(records.map((r) => r.id));
   const missing = Array.from(
-    new Set(comments.flatMap((c) => c.mentions)),
+    new Set(comments.flatMap((c) => recordIdsOf(c.mentions))),
   ).filter((id) => !loaded.has(id));
   const mentionedRecords =
     missing.length === 0
